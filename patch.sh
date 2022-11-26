@@ -1,12 +1,12 @@
 #!/bin/bash
 
-make -C /home/filipkosecek/Documents/testing/src/ all
-./src/patch_target & disown
+make -C /home/filipkosecek/Documents/patching-tool/example/ all
+./example/patch_target & disown
 
 target_pid=$( ps -e | grep "patch_target" | awk '{ print $1 }' )
 echo "The target's pid is: ${target_pid}"
 
-gdb -p "$target_pid" --batch --command=script.gdb
+gdb -p $target_pid --command=src/script.gdb
 
-kill $targtet_pid
-make -C /home/filipkosecek/Documents/testing/src/ clean
+echo $target_pid | xargs kill "patch_target"
+make -C /home/filipkosecek/Documents/patching-tool/example clean
