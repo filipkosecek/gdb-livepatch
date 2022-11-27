@@ -1,6 +1,8 @@
 #include <stdio.h>
 
 int main(void){
-	puts("Hello World");
+	while(1){
+		puts("Hello World");
+	}
 	return 0;
 }

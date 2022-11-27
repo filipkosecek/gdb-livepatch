@@ -15,8 +15,12 @@ end
 
 #write trampoline to replace function $arg0 with $arg1
 define write-trampoline
-	set $PATCH_ADDR = (char *)&patch_function
-	set $TARGET_ADDR = (char *)&target_function
+	if $argc != 2
+		echo "You have to specify target and replace functions!"
+	end
+
+	set $PATCH_ADDR = (char *)&$arg1
+	set $TARGET_ADDR = (char *)&$arg0
 	set $TRAMPOLINE = (char [13]) {0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3}
 
 	#convert to array of bytes
@@ -39,24 +43,21 @@ end
 
 
 define exec-patch-own
-	if $argc != 2
-		echo "You must specify path to your patch library and the point where your program stops execution before applying the patch!"
+	if $argc != 4
+		echo "Wrong number of arguments! The list goes: path to patch library, line where the program stops execution before applying the patch, name of the function to be replaced, replace function!"
 	else
 		break $arg1
 		continue
 		clear $arg1
 		load-patch $arg0
-		write-patch
+		write-trampoline $arg2 $arg3
 	end
 end
 
 define exec-patch-lib
-	if $argc != 2
+	if $argc != 1
 		echo "You must specify path to your patch library and the point where your program stops execution before applying the patch!"
 	else
-		break $arg1
-		continue
-		clear $arg1
 		load-patch $arg0
 		
 		#find plt record, hardcoded for now
@@ -70,6 +71,3 @@ define exec-patch-lib
 		set *$OFFSET = (char *) &my_puts
 	end
 end
-
-#main
-#execpatch "/home/filipkosecek/Documents/patching-tool/example/patch.so" 12
