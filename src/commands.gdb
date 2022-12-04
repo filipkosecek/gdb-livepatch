@@ -6,19 +6,20 @@ define patch-own
 		set $TARGET_ADDR = -1
 
 		set $DLOPEN_ADDR = &dlopen
-		set $PATCH_ADDR = (char *)&$arg1
-		set $TARGET_ADDR = (char *)&$arg0
+		set $TARGET_ADDR = (char *) &$arg1
+		
+		if ($TARGET_ADDR != -1 && $DLOPEN_ADDR != -1)
 
-		if ($PATCH_ADDR != -1 && $TARGET_ADDR != -1 && $DLOPEN_ADDR != -1)
-
-			#check if code where trampoline is about to be placed is not being executed
-			if ($rip < $PATCH_ADDR || $rip >= $PATCH_ADDR + 13)
+			#check if the code segment where the trampoline is about to be placed is not being executed
+			if ($rip < $TARGET_ADDR || $rip >= $TARGET_ADDR + 13)
 
 				#dlopen the patch library
 				set $DLOPEN_RET = dlopen($arg0, 2)
 				if $DLOPEN_RET != 0
 					set $TRAMPOLINE = (char [13]) {0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3}
 
+					set $PATCH_ADDR = (char *) &$arg2
+					
 					#convert to array of bytes
 					set $PATCH_ADDR_ARR = (char[8])$PATCH_ADDR
 
@@ -42,7 +43,7 @@ define patch-own
 				echo "Control flow is just in the point where the trampoline is about to be written."
 			end
 		else
-			echo "Couldn't find target and patch functions or dlopen."
+			echo "Couldn't find target function or dlopen."
 		end
 	else
 		echo "You have to specify target and patch functions."
