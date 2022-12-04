@@ -1,4 +1,6 @@
-define patch-own
+define-prefix patch
+
+define patch own
 	dont-repeat
 	if $argc == 3
 		#initialize variables
@@ -61,7 +63,7 @@ define patch-own
 end
 
 #TODO parametrize target and patch functions
-define patch-lib
+define patch lib
 	dont-repeat
 	if $argc == 3
 		set $PLT_RECORD = -1
