@@ -1,46 +1,58 @@
 #load patch module
 define load-patch
-	if $argc != 1
-		echo "Something went wrong!"
-	end
-
-	#TODO check if dlopen is loaded
-	set $DLOPEN_ADDR = &dlopen
-
-	set $DLOPEN_RET = dlopen($arg0, 2)
-	if $DLOPEN_RET == 0
-		echo "Couldn't open patch library."
+	if $argc == 1
+		#TODO check if dlopen is loaded
+		set $DLOPEN_ADDR = -1
+		set $DLOPEN_ADDR = &dlopen
+	
+		if $DLOPEN_ADDR == -1
+			echo "Couldn't find dlopen function."
+		else
+			set $DLOPEN_RET = dlopen($arg0, 2)
+			if $DLOPEN_RET == 0
+				echo "Couldn't open patch library."
+			end
+		end
+	else
+		echo "Wrong number of arguments!"
 	end
 end
 
 #write trampoline to replace function $arg0 with $arg1
 define write-trampoline
-	if $argc != 2
-		echo "You have to specify target and replace functions!"
-	end
+	if $argc == 2
+		set $PATCH_ADDR = -1
+		set $TARGET_ADDR = -1
 
-	set $PATCH_ADDR = (char *)&$arg1
-	set $TARGET_ADDR = (char *)&$arg0
-	set $TRAMPOLINE = (char [13]) {0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3}
+		set $PATCH_ADDR = (char *)&$arg1
+		set $TARGET_ADDR = (char *)&$arg0
 
-	#convert to array of bytes
-	set $PATCH_ADDR_ARR = (char[8])$PATCH_ADDR
+		if ($PATCH_ADDR != -1 && $TARGET_ADDR != -1)
+			set $TRAMPOLINE = (char [13]) {0x49, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE3}
 
-	#copy address of dlopened object to trampoline
-	set $i = 0
-	while $i <= 7
-		set $TRAMPOLINE[$i+2] = $PATCH_ADDR_ARR[$i]
-		set $i += 1
-	end
+			#convert to array of bytes
+			set $PATCH_ADDR_ARR = (char[8])$PATCH_ADDR
 
-	#write trampoline into the target function
-	set $i = 0
-	while $i <= 12
-		set $TARGET_ADDR[$i] = $TRAMPOLINE[$i]
-		set $i += 1
+			#copy address of dlopened object to trampoline
+			set $i = 0
+			while $i <= 7
+				set $TRAMPOLINE[$i+2] = $PATCH_ADDR_ARR[$i]
+				set $i += 1
+			end
+
+			#write trampoline into the target function
+			set $i = 0
+			while $i <= 12
+				set $TARGET_ADDR[$i] = $TRAMPOLINE[$i]
+				set $i += 1
+			end
+		else
+			echo "Couldn't find target and patch functions!"
+		end
+	else
+		echo "You have to target and patch functions!"
 	end
 end
-
 
 define exec-patch-own
 	if $argc != 4
