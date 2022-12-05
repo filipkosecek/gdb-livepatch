@@ -1,42 +1,53 @@
 import gdb
 
 class PatchOwn (gdb.Command):
-    "Patch your own function"
+    "Enables you to patch your own function."
 
     def __init__(self):
         super(PatchOwn, self).__init__("patchown", gdb.COMMAND_USER)
 
-    def find_necessary_objects(self, obj: str) -> gdb.Value:
-        
+    def find_object(self, obj: str) -> gdb.Value:
+        try:
+            obj_addr = gdb.parse_and_eval(obj)
+        except:
+            raise gdb.GdbError("Couldn't find " + obj + ".")
+        else:
+            return obj_addr
 
     def invoke(self, arg, from_tty):
         argv = gdb.string_to_argv(arg)
         if len(argv) != 3:
             raise gdb.GdbError("patch own takes three parameters")
 
-        try:
-            target_addr = gdb.parse_and_eval(argv[1])
-        except:
-            raise gdb.GdbError("Couldn't find target function.")
-        
+        #find necessary objects
+        dlopen_addr = self.find_object("dlopen")
+        target_addr = self.find_object(argv[1])
+        trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3")
+
+        #check if the code segment where the trampoline is about to be written is not being executed
+        tmp = int(target_addr.cast(gdb.lookup_type("uint64_t")))
+        rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
+        if rip >= tmp and rip < tmp + 13:
+            raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
+
+
+        #cast target_addr to char *
         target_addr = target_addr.cast(gdb.lookup_type("char").pointer())
 
-        try:
-            dlopen_addr = gdb.parse_and_eval("dlopen")
-        except:
-            raise gdb.GdbError("something went wrong")
-        
+
+        #dlopen patch library
         dlopen_ret = dlopen_addr("/home/filipkosecek/Documents/patching-tool/examples/inc/patch.so", 2)
         if dlopen_ret == 0:
-            raise gdb.GdbError("dlopen failed")
-
-        trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3")
-   
+            raise gdb.GdbError("Couldn't open the patch library.")
+        
         try:
-            patch_addr = gdb.parse_and_eval(argv[2])
+            patch_addr = self.find_object(argv[2])
         except:
-            raise gdb.GdbError("Couldn't find patch function.")
+            dlclose = self.find_object("dlclose")
+            dlclose(dlopen_ret)
+            raise gdb.GdbError("Couldn't find the patch function.")
 
+        #TODO uint64_t may not be supported
         patch_addr = patch_addr.cast(gdb.lookup_type("uint64_t"))
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
@@ -45,4 +56,5 @@ class PatchOwn (gdb.Command):
 
         inferior = gdb.selected_inferior()
         inferior.write_memory(target_addr, trampoline, 13)
+
 PatchOwn()
