@@ -11,19 +11,19 @@ make -C $PATH_LIB all
 target_pid=$( ps -e | grep "patch_target" | awk '{ print $1 }' )
 echo "The target's pid is: ${target_pid}."
 
-gdb -p $target_pid --command=src/commands.gdb
+gdb -p "${target_pid}" --command=src/commands.py
 
 echo $target_pid | xargs kill
 
-./examples/libfunction/test & disown
+#./examples/libfunction/test & disown
 
-target_pid=$( ps -e | grep "test" | awk '{ print $1 }' )
+#target_pid=$( ps -e | grep "test" | awk '{ print $1 }' )
 
-echo "The target's pid is: ${target_pid}."
+#echo "The target's pid is: ${target_pid}."
 
-gdb -p $target_pid --command=src/commands.gdb
+#gdb -p $target_pid --command=src/commands.gdb
 
-echo $target_pid | xargs kill
+#echo $target_pid | xargs kill
 
 make -C $PATH_OWN clean
 make -C $PATH_LIB clean
