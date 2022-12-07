@@ -1,7 +1,7 @@
 #!/bin/bash
 
 PATH_OWN="/home/filipkosecek/Documents/patching-tool/examples/inc/"
-PATH_LIB="/home/filipkosecek/Documents/patching-tool/examples/libfunction/"
+PATH_LIB="/home/filipkosecek/Documents/patching-tool/examples/hello/"
 
 make -C $PATH_OWN all
 make -C $PATH_LIB all
@@ -15,15 +15,16 @@ gdb -p "${target_pid}" --command=src/commands.py
 
 echo $target_pid | xargs kill
 
-#./examples/libfunction/test & disown
+./examples/hello/test & disown
+sleep 2;
 
-#target_pid=$( ps -e | grep "test" | awk '{ print $1 }' )
+target_pid=$( ps -e | grep "test" | awk '{ print $1 }' )
 
-#echo "The target's pid is: ${target_pid}."
+echo "The target's pid is: ${target_pid}."
 
-#gdb -p $target_pid --command=src/commands.gdb
+gdb -p $target_pid --command=src/commands.py
 
-#echo $target_pid | xargs kill
+echo $target_pid | xargs kill
 
 make -C $PATH_OWN clean
 make -C $PATH_LIB clean
