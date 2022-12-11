@@ -1,0 +1,5 @@
+-we would probably like to implement new commands as one and the patching strategy
+should be determined based on information from custom section just like in bakatsugi
+-how to parse patch library binary (use python tools or handy tools accesible from shell)
+-what about short functions
+-how to save metadata for rollback

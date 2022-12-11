@@ -1,5 +1,7 @@
 import gdb
 
+type_list = ["char", "uint64_t", "int32_t"]
+
 class Patch (gdb.Command):
     "Prefix command for live patching functions."
 
@@ -9,6 +11,8 @@ class Patch (gdb.Command):
 
 class PatchOwn (gdb.Command):
     "Patch your own functions."
+
+    type_dict = {}
 
     def __init__(self):
         super(PatchOwn, self).__init__("patch own", gdb.COMMAND_USER)
@@ -23,10 +27,14 @@ class PatchOwn (gdb.Command):
 
     def is_patchable(self, target_addr: gdb.Value):
         try:
-            tmp = int(target_addr.cast(gdb.lookup_type("uint64_t")))
-            rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
+            #check if essential types are present in the target process
+            for t in type_list:
+                self.type_dict[t] = gdb.lookup_type(t)
+
+            tmp = int(target_addr.cast(self.type_dict["uint64_t"]))
+            rip = int(gdb.parse_and_eval("$rip").cast(self.type_dict["uint64_t"]))
         except:
-            raise gdb.GdbError("Something went wrong.")
+            raise gdb.GdbError("Required types were not supported.")
         else:
             if rip >= tmp and rip < tmp + 13:
                 raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
@@ -46,6 +54,7 @@ class PatchOwn (gdb.Command):
             return patch_addr
 
     def invoke(self, arg, from_tty):
+        self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
         if len(argv) != 3:
             raise gdb.GdbError("patch own takes three parameters")
@@ -58,15 +67,14 @@ class PatchOwn (gdb.Command):
         self.is_patchable(target_addr)
         patch_addr = self.load_patch_lib(dlopen_addr, argv[0], argv[2])
 
-        #TODO uint64_t may not be supported
-        patch_addr = patch_addr.cast(gdb.lookup_type("uint64_t"))
+        patch_addr = patch_addr.cast(self.type_dict["uint64_t"])
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
         for i in range(8):
             trampoline[i+2] = patch_addr_arr[i]
 
         #cast target_addr to char *
-        target_addr = target_addr.cast(gdb.lookup_type("char").pointer())
+        target_addr = target_addr.cast(self.type_dict["char"].pointer())
         inferior = gdb.selected_inferior()
         inferior.write_memory(target_addr, trampoline, 13)
 
