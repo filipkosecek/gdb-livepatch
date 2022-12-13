@@ -1,1 +1,1 @@
-Use gdb -p $target-pid --commands=src/commands.py
+Use: ./patch.sh apply $pid $path-to-patchlib

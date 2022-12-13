@@ -1,30 +1,65 @@
 #!/bin/bash
 
-PATH_OWN="/home/filipkosecek/Documents/patching-tool/examples/inc/"
-PATH_LIB="/home/filipkosecek/Documents/patching-tool/examples/hello/"
+#TODO handle errors
 
-make -C $PATH_OWN all
-make -C $PATH_LIB all
+SECTION=".patch"
+DELIMITER=";"
+OUTFILE="${SECTION}-dump.bin"
 
-./examples/inc/patch_target & disown
+if [[ $# -ne 3 ]]; then
+	echo "Enter the type of operation, pid and path to patch libary." 1<&2
+	exit 1
+fi
 
-target_pid=$( ps -e | grep "patch_target" | awk '{ print $1 }' )
-echo "The target's pid is: ${target_pid}."
+if [[ $1 != "apply" ]]; then
+	echo "Only patch application is for now supported." 1<&2
+	exit 1
+fi
 
-gdb -p "${target_pid}" --command=src/commands.py
+#check if pid is valid
+if [[ -z $( ps -e | grep $2 ) ]]; then
+	echo "Pid is not valid." 1<&2
+	exit 1
+fi
 
-echo $target_pid | xargs kill
+#check if there is a patch section in patch library
+objdump -s -j $SECTION $3 > /dev/null
+if [[ $? -ne 0 ]]; then
+	echo "Could't find .patch section in the patch library." 1<&2
+	exit 1
+fi
 
-./examples/hello/test & disown
-sleep 2;
+#extract data from .patch section
+objcopy --dump-section $SECTION=$OUTFILE $3
+META=$( cat $OUTFILE )
+rm $OUTFILE
+if [[ -z $META ]];then
+	echo "Invalid metadata in .patch section." 1<&2
+	exit 1
+fi
 
-target_pid=$( ps -e | grep "test" | awk '{ print $1 }' )
+#TODO check if characters are printable
+#extract metadata
+TYPE=$( echo $META | cut -d ';' -f 1 )
+OLD=$( echo $META | cut -d ';' -f 2 )
+NEW=$( echo $META | cut -d ';' -f 3 )
 
-echo "The target's pid is: ${target_pid}."
+if [[ $TYPE != "O" && $TYPE != "L" ]] || [[ -z $OLD || -z $NEW ]];then
+	echo "Invalid metadata format." 1<&2
+	exit 1
+fi
 
-gdb -p $target_pid --command=src/commands.py
+#create command file for gdb
+COMMANDS=".tmp.gdb"
+echo "source $( pwd )/src/commands.py" >> $COMMANDS
+if [[ $TYPE == "O" ]]; then
+	echo -n "patch own " >> $COMMANDS
+else
+	echo -n "patch lib " >> $COMMANDS
+fi
+echo "\"$3\" ${OLD} ${NEW}" >> $COMMANDS
+echo "detach" >> $COMMANDS
 
-echo $target_pid | xargs kill
+gdb -p $2 --batch --command=$COMMANDS > /dev/null
 
-make -C $PATH_OWN clean
-make -C $PATH_LIB clean
+rm $COMMANDS

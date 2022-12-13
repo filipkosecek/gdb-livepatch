@@ -1,13 +1,13 @@
 .PHONY: clean all
 
-all: patch_target patch
+all: hello patch
 
-patch_target: test.c
-	gcc -Wall -Werror -W -ggdb -o test test.c
+hello: hello.c
+	gcc -Wall -Werror -W -ggdb -o hello hello.c
 
 patch: patch.c
-	gcc -Wall -W -fPIC -shared -o patch.so patch.c
+	gcc -Wall -W -fPIC -shared -o patch.so patch.c -I../header/
 
 clean:
-	rm test
+	rm hello
 	rm patch.so
