@@ -40,9 +40,9 @@ fi
 
 #TODO check if characters are printable
 #extract metadata
-TYPE=$( echo $META | cut -d ';' -f 1 )
-OLD=$( echo $META | cut -d ';' -f 2 )
-NEW=$( echo $META | cut -d ';' -f 3 )
+TYPE=$( echo $META | cut -d ':' -f 1 )
+OLD=$( echo $META | cut -d ':' -f 2 )
+NEW=$( echo $META | cut -d ':' -f 3 )
 
 if [[ $TYPE != "O" && $TYPE != "L" ]] || [[ -z $OLD || -z $NEW ]];then
 	echo "Invalid metadata format." 1<&2
@@ -60,6 +60,6 @@ fi
 echo "\"$3\" ${OLD} ${NEW}" >> $COMMANDS
 echo "detach" >> $COMMANDS
 
-gdb -p $2 --batch --command=$COMMANDS > /dev/null
+gdb -p $2 --batch --command=$COMMANDS
 
 rm $COMMANDS

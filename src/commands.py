@@ -54,7 +54,13 @@ class PatchOwn (gdb.Command):
 
         beg = int(section_beg, base=16)
         end = int(section_end, base=16)
-        return beg, end
+        #assuming there is a null terminating character
+        return beg, end - beg - 1
+
+    def extract_patch_metadata(self, section_beg: int, data_length: int) -> tuple[str, str, str]:
+        inferior = gdb.selected_inferior()
+        items = inferior.read_memory(section_beg, data_length).tobytes().decode().split(":")
+        return items[0], items[1], items[2]
 
     def find_object(self, obj: str) -> gdb.Value:
         try:
@@ -117,7 +123,8 @@ class PatchOwn (gdb.Command):
         inferior = gdb.selected_inferior()
         inferior.write_memory(target_addr, trampoline, 13)
 
-        self.find_patch_section_range()
+        tup = self.find_patch_section_range()
+        metadata = self.extract_patch_metadata(tup[0], tup[1])
 
 class PatchLib (gdb.Command):
     "Patch library function."
