@@ -8,7 +8,6 @@ class Patch (gdb.Command):
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_SUPPORT, gdb.COMPLETE_NONE, True)
 
-
 class PatchOwn (gdb.Command):
     "Patch your own functions."
 
@@ -16,6 +15,46 @@ class PatchOwn (gdb.Command):
 
     def __init__(self):
         super(PatchOwn, self).__init__("patch own", gdb.COMMAND_USER)
+
+    def find_patch_section_range(self) -> tuple[int, int]:
+        output = gdb.execute("maintenance info sections -all-objects .patch", False, True)
+        index = output.find(".patch")
+        #find delimiter of section range
+        while index >= 0 and (output[index] != '-' or output[index+1] != '>'):
+            index -= 1
+        if index < 0:
+            gdb.GdbError("Couldn't find section address.")
+
+        #find section base address
+        section_beg_index = index
+        while section_beg_index >= 0 and output[section_beg_index] != 'x':
+            section_beg_index -= 1
+        if section_beg_index < 0:
+            gdb.GdbError("Couldn't find section address")
+        section_beg_index += 1
+
+        #copy section base address bytes and convert to int
+        section_beg = ""
+        while output[section_beg_index] != '-':
+            section_beg += output[section_beg_index]
+            section_beg_index += 1
+
+        #find section end address
+        section_end_index = index
+        while output[section_end_index] != 'x':
+            section_end_index += 1
+        section_end_index += 1
+
+        #build string
+        section_end = ""
+        while output[section_end_index] != ' ':
+            section_end += output[section_end_index]
+            section_end_index += 1
+
+
+        beg = int(section_beg, base=16)
+        end = int(section_end, base=16)
+        return beg, end
 
     def find_object(self, obj: str) -> gdb.Value:
         try:
@@ -77,6 +116,8 @@ class PatchOwn (gdb.Command):
         target_addr = target_addr.cast(self.type_dict["char"].pointer())
         inferior = gdb.selected_inferior()
         inferior.write_memory(target_addr, trampoline, 13)
+
+        self.find_patch_section_range()
 
 class PatchLib (gdb.Command):
     "Patch library function."
