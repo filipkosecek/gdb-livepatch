@@ -2,18 +2,26 @@ import gdb
 
 type_list = ["char", "uint64_t", "int32_t"]
 
-def find_patch_section_range(section_name: str) -> tuple[int, int]:
+def find_patch_section_range(section_name: str, object_path: str) -> tuple[int, int]:
     output = gdb.execute("maintenance info sections -all-objects " + section_name, False, True)
-    index = output.find(section_name)
+    items = output.split("Object file:")
+    for item in items:
+        if item.find(object_path) != -1:
+            tmp = item
+            break
+    if not tmp:
+        raise gdb.GdbError("Couldn't find " + object_path + " object.")
+
+    index = tmp.find(section_name)
     #find delimiter of section range
-    while index >= 0 and (output[index] != '-' or output[index+1] != '>'):
+    while index >= 0 and (tmp[index] != '-' or tmp[index+1] != '>'):
         index -= 1
     if index < 0:
         gdb.GdbError("Couldn't find section address.")
 
     #find section base address
     section_beg_index = index
-    while section_beg_index >= 0 and output[section_beg_index] != 'x':
+    while section_beg_index >= 0 and tmp[section_beg_index] != 'x':
         section_beg_index -= 1
     if section_beg_index < 0:
         gdb.GdbError("Couldn't find section address")
@@ -21,26 +29,25 @@ def find_patch_section_range(section_name: str) -> tuple[int, int]:
 
     #copy section base address bytes and convert to int
     section_beg = ""
-    while output[section_beg_index] != '-':
-        section_beg += output[section_beg_index]
+    while tmp[section_beg_index] != '-':
+        section_beg += tmp[section_beg_index]
         section_beg_index += 1
 
     #find section end address
     section_end_index = index
-    while output[section_end_index] != 'x':
+    while tmp[section_end_index] != 'x':
         section_end_index += 1
     section_end_index += 1
 
     #build string
     section_end = ""
-    while output[section_end_index] != ' ':
-        section_end += output[section_end_index]
+    while tmp[section_end_index] != ' ':
+        section_end += tmp[section_end_index]
         section_end_index += 1
 
     beg = int(section_beg, base=16)
     end = int(section_end, base=16)
-    #assuming there is a null terminating character
-    return beg, end - beg - 1
+    return beg, end - beg
 
 def find_object(obj: str) -> gdb.Value:
     try:
@@ -190,8 +197,9 @@ class Patch (gdb.Command):
         self.dlclose_addr = find_object("dlclose")
         self.is_patchable()
         self.load_patch_lib(argv[0])
-        span = find_patch_section_range(".patch")
-        metadata = self.extract_patch_metadata(span[0], span[1])
+        span = find_patch_section_range(".patch", argv[0])
+        #we assume the last character is terminating 0
+        metadata = self.extract_patch_metadata(span[0], span[1]-1)
 
         for patch in metadata:
             target_func = patch[1]
