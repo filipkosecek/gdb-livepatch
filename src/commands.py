@@ -155,10 +155,16 @@ class Patch (gdb.Command):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
 
-    def extract_patch_metadata(self, section_beg: int, data_length: int) -> tuple[str, str, str]:
+    def extract_patch_metadata(self, section_beg: int, data_length: int) -> list[list[str]]:
         inferior = gdb.selected_inferior()
-        items = inferior.read_memory(section_beg, data_length).tobytes().decode().split(":")
-        return items[0], items[1], items[2]
+        items = inferior.read_memory(section_beg, data_length).tobytes().decode().split(";")
+        result = []
+        for item in items:
+            #TODO
+            if not item:
+                continue
+            result.append(item.split(":"))
+        return result
 
     def is_patchable(self):
         try:
@@ -186,16 +192,18 @@ class Patch (gdb.Command):
         self.load_patch_lib(argv[0])
         span = find_patch_section_range(".patch")
         metadata = self.extract_patch_metadata(span[0], span[1])
-        target_func = metadata[1]
-        patch_func = metadata[2]
 
-        if metadata[0] == 'O':
-            self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
-        elif metadata[0] == 'L':
-            self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
-        else:
-            raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
+        for patch in metadata:
+            target_func = patch[1]
+            patch_func = patch[2]
 
-        self.strategy.do_patch()
+            if patch[0] == 'O':
+                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+            elif patch[0] == 'L':
+                self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+            else:
+                raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
+
+            self.strategy.do_patch()
 
 Patch()

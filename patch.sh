@@ -17,6 +17,6 @@ echo "source $( pwd )/src/commands.py" > $COMMANDS
 echo "patch $2" >> $COMMANDS
 echo "detach" >> $COMMANDS
 
-gdb -p $1 --batch --command=$COMMANDS > /dev/null
+gdb -p $1 --batch --command=$COMMANDS
 
 rm $COMMANDS
