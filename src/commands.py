@@ -61,6 +61,9 @@ class AbsoluteTrampoline:
     def __init__(self):
        self.trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3")
 
+    def size(self) -> int:
+        return 13
+
     def complete_address(self, addr: bytearray):
         for i in range(8):
             self.trampoline[i+2] = addr[i]
@@ -82,6 +85,24 @@ class PatchStrategy:
     def clean(self):
         pass
 
+    def write_backup(self, address: int):
+        pass
+
+    #this function writes a 32 byte block into .patch.backup section of patch library
+    #size of memcontent may vary hence padding_size
+    def write_backup(self, address: int, padding_size: int):
+        target_addr = int(find_object(self.target_func).cast(gdb.lookup_type("uint64_t")))
+        lib_handle = int(self.lib_handle.cast(gdb.lookup_type("uint64_t")))
+        buffer = bytearray()
+        buffer.extend(lib_handle.to_bytes(8, byteorder="little"))
+        buffer.extend(target_addr.to_bytes(8, byteorder="little"))
+        padding = bytearray(padding_size)
+        padding[0] = padding_size
+        buffer.extend(padding)
+        buffer.extend(self.membackup)
+        inferior = gdb.selected_inferior()
+        inferior.write_memory(address, buffer, len(buffer))
+
 class PatchOwnStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, target_func, patch_func)
@@ -94,6 +115,7 @@ class PatchOwnStrategy (PatchStrategy):
             raise gdb.GdbError("Couldn't find target function symbol.")
 
         #control flow must not be where the trampoline is about to be inserted
+        #TODO control flow must not be in the function, it may lead to crash
         tmp = int(target_addr.cast(gdb.lookup_type("uint64_t")))
         rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
         if rip >= tmp and rip < tmp + 13:
@@ -104,18 +126,24 @@ class PatchOwnStrategy (PatchStrategy):
         try:
             patch_addr = find_object(self.patch_func).cast(gdb.lookup_type("uint64_t"))
         except:
-            self.clean()
-            raise gdb.GdbError("Couldn't find patch function symbol.")
+            raise gdb.GdbError("Couldn't find " + patch_func  + " symbol.")
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
         #write trampoline
         trampoline = AbsoluteTrampoline()
+
+        #backup data
+        inferior = gdb.selected_inferior()
+        self.membackup = bytearray(inferior.read_memory(target_addr.cast(gdb.lookup_type("char").pointer()), trampoline.size()))
         trampoline.complete_address(patch_addr_arr)
         #cast target_addr to char *
         trampoline.write_trampoline(target_addr.cast(gdb.lookup_type("char").pointer()))
 
     def clean(self):
         self.dlclose(self.lib_handle)
+
+    def write_backup(self, address: int):
+        super().write_backup(address, 3)
 
 class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
@@ -153,6 +181,9 @@ class PatchLibStrategy (PatchStrategy):
     def clean(self):
         pass
 
+    def write_backup(self, address: int):
+        super().write_backup(address, 8)
+
 class Patch (gdb.Command):
     "Patch your functions."
 
@@ -160,7 +191,6 @@ class Patch (gdb.Command):
 
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
-
 
     def extract_patch_metadata(self, section_beg: int, data_length: int) -> list[list[str]]:
         inferior = gdb.selected_inferior()
@@ -201,6 +231,9 @@ class Patch (gdb.Command):
         #we assume the last character is terminating 0
         metadata = self.extract_patch_metadata(span[0], span[1]-1)
 
+        base = find_patch_section_range(".patch.backup", argv[0])[0]
+        index = 0
+
         for patch in metadata:
             target_func = patch[1]
             patch_func = patch[2]
@@ -213,5 +246,7 @@ class Patch (gdb.Command):
                 raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
 
             self.strategy.do_patch()
+            self.strategy.write_backup(base + index*32)
+            index += 1
 
 Patch()

@@ -1,7 +1,2 @@
--problem ze potrebujeme debuggovacie symboly pre libc
--radsej pouzit dlsym?
--posielanie deskriptorov
--ako ukladat metadata pre rollback
+-gdb nema tabulku symbolov pre libc (mozno je treba najst dlopen a dlclose ako samo)
 
--skusit samov nastroj na stripovanu binarku
--metadata pre patch ukladat mozno do sekcii
