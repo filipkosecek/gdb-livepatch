@@ -92,9 +92,7 @@ class PatchStrategy:
     #size of memcontent may vary hence padding_size
     def write_backup(self, address: int, padding_size: int):
         target_addr = int(find_object(self.target_func).cast(gdb.lookup_type("uint64_t")))
-        lib_handle = int(self.lib_handle.cast(gdb.lookup_type("uint64_t")))
         buffer = bytearray()
-        buffer.extend(lib_handle.to_bytes(8, byteorder="little"))
         buffer.extend(target_addr.to_bytes(8, byteorder="little"))
         padding = bytearray(padding_size)
         padding[0] = padding_size
@@ -216,37 +214,72 @@ class Patch (gdb.Command):
         if self.dlopen_ret == 0:
             raise gdb.GdbError("Couldn't open the patch library.")
 
+    def clean(self, objfile: str) -> None:
+        rn = find_patch_section_range(".patch.backup", objfile)
+        base = rn[0]
+        inferior = gdb.selected_inferior()
+        lib_handle_arr = bytearray(inferior.read_memory(base, 8))
+        lib_handle = int.from_bytes(lib_handle_arr, "little")
+        base += len(lib_handle_arr)
+        while True:
+            index = 0
+            target_func_addr = int.from_bytes(bytearray(inferior.read_memory(base + index, 8)), "little")
+            index += 8
+            padding_size = int.from_bytes(bytearray(inferior.read_memory(base + index, 1)), "little")
+            if padding_size == 0:
+                break
+            index += padding_size
+            memcontent = bytearray(inferior.read_memory(base + index, 24 - index))
+
+            inferior.write_memory(target_func_addr, memcontent, len(memcontent))
+            base += 24
+
+        self.dlclose_addr(lib_handle)
+
     def invoke(self, arg, from_tty):
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
-        if len(argv) != 1:
-            raise gdb.GdbError("patch own takes one parameter")
+        if len(argv) != 2:
+            raise gdb.GdbError("patch own takes two parameters")
 
         #find necessary objects
         self.dlopen_addr = find_object("dlopen")
         self.dlclose_addr = find_object("dlclose")
         self.is_patchable()
-        self.load_patch_lib(argv[0])
-        span = find_patch_section_range(".patch", argv[0])
-        #we assume the last character is terminating 0
-        metadata = self.extract_patch_metadata(span[0], span[1]-1)
 
-        base = find_patch_section_range(".patch.backup", argv[0])[0]
-        index = 0
+        if argv[1] == "T":
+            self.load_patch_lib(argv[0])
+            span = find_patch_section_range(".patch", argv[0])
+            #we assume the last character is terminating 0
+            metadata = self.extract_patch_metadata(span[0], span[1]-1)
 
-        for patch in metadata:
-            target_func = patch[1]
-            patch_func = patch[2]
+            base = find_patch_section_range(".patch.backup", argv[0])[0]
+            index = 0
 
-            if patch[0] == 'O':
-                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
-            elif patch[0] == 'L':
-                self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
-            else:
-                raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
+            inferior = gdb.selected_inferior()
+            lib_handle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
+            buffer = bytearray(lib_handle.to_bytes(8, byteorder="little"))
+            inferior.write_memory(base, buffer, len(buffer))
+            base += len(buffer)
 
-            self.strategy.do_patch()
-            self.strategy.write_backup(base + index*32)
-            index += 1
+            for patch in metadata:
+                target_func = patch[1]
+                patch_func = patch[2]
+
+                if patch[0] == 'O':
+                    self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+                elif patch[0] == 'L':
+                    self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+                else:
+                    raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
+
+                self.strategy.do_patch()
+                self.strategy.write_backup(base + index*24)
+                index += 1
+
+        elif argv[1] == "R":
+            self.clean(argv[0])
+        else:
+           raise gdb.GdbError("Unrecognized option.") 
 
 Patch()
