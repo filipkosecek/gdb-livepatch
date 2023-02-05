@@ -90,10 +90,9 @@ class PatchStrategy:
 
     #this function writes a 32 byte block into .patch.backup section of patch library
     #size of memcontent may vary hence padding_size
-    def write_backup(self, address: int, padding_size: int):
-        target_addr = int(find_object(self.target_func).cast(gdb.lookup_type("uint64_t")))
+    def write_backup(self, address: int, dest: int,  padding_size: int):
         buffer = bytearray()
-        buffer.extend(target_addr.to_bytes(8, byteorder="little"))
+        buffer.extend(dest.to_bytes(8, byteorder="little"))
         padding = bytearray(padding_size)
         padding[0] = padding_size
         buffer.extend(padding)
@@ -108,6 +107,7 @@ class PatchOwnStrategy (PatchStrategy):
     def do_patch(self):
         try:
             target_addr = find_object(self.target_func)
+            self.target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
         except:
             self.clean()
             raise gdb.GdbError("Couldn't find target function symbol.")
@@ -141,7 +141,7 @@ class PatchOwnStrategy (PatchStrategy):
         self.dlclose(self.lib_handle)
 
     def write_backup(self, address: int):
-        super().write_backup(address, 3)
+        super().write_backup(address, self.target_addr, 3)
 
 class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
@@ -170,17 +170,20 @@ class PatchLibStrategy (PatchStrategy):
         #calculate got.plt entry
         addr_got = next_instruction.cast(gdb.lookup_type("char").pointer())
         addr_got += relative_addr
+        self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
         patch_arr = int(patch).to_bytes(8, byteorder = "little")
 
-        #write patch function address
         inferior = gdb.selected_inferior()
+        #backup data
+        self.membackup = bytearray(inferior.read_memory(addr_got, 8))
+        #write patch function address
         inferior.write_memory(addr_got, patch_arr, 8)
 
     def clean(self):
         pass
 
     def write_backup(self, address: int):
-        super().write_backup(address, 8)
+        super().write_backup(address, self.addr_got, 8)
 
 class Patch (gdb.Command):
     "Patch your functions."
