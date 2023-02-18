@@ -49,13 +49,22 @@ def find_patch_section_range(section_name: str, object_path: str) -> tuple[int, 
     end = int(section_end, base=16)
     return beg, end - beg
 
-def find_object(obj: str) -> gdb.Value:
+def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
-        obj_addr = gdb.parse_and_eval(obj)
+        objfile = gdb.lookup_objfile(objfile_name)
+        symbol = objfile.lookup_global_symbol(symbol_name).value()
     except:
-        raise gdb.GdbError("Couldn't find " + obj + ".")
+        raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
     else:
-        return obj_addr
+        return symbol
+
+def find_object(symbol_name: str) -> gdb.Value:
+    try:
+        symbol = gdb.parse_and_eval(symbol_name)
+    except:
+        raise gdb.GdbError("Couldn't find " + symbol_name + ".")
+    else:
+        return symbol
 
 class AbsoluteTrampoline:
     def __init__(self):
@@ -73,9 +82,10 @@ class AbsoluteTrampoline:
         inferior.write_memory(address, self.trampoline, 13)
 
 class PatchStrategy:
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
+    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
         self.lib_handle = lib_handle
         self.dlclose = dlclose
+        self.path = path
         self.target_func = target_func
         self.patch_func = patch_func
 
@@ -101,8 +111,8 @@ class PatchStrategy:
         inferior.write_memory(address, buffer, len(buffer))
 
 class PatchOwnStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
-        super().__init__(lib_handle, dlclose, target_func, patch_func)
+    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str):
+        super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
     def do_patch(self):
         try:
@@ -122,9 +132,9 @@ class PatchOwnStrategy (PatchStrategy):
 
         #try to resolve symbol for patch function
         try:
-            patch_addr = find_object(self.patch_func).cast(gdb.lookup_type("uint64_t"))
+            patch_addr = find_object_obj(self.patch_func, self.path).cast(gdb.lookup_type("uint64_t"))
         except:
-            raise gdb.GdbError("Couldn't find " + patch_func  + " symbol.")
+            raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
         #write trampoline
@@ -144,15 +154,15 @@ class PatchOwnStrategy (PatchStrategy):
         super().write_backup(address, self.target_addr, 3)
 
 class PatchLibStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, target_func: str, patch_func: str):
-        super().__init__(lib_handle, dlclose, target_func, patch_func)
+    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
+        super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
     def do_patch(self):
         #find target and patch functions
         try:
             target = "'" + self.target_func + "@plt'"
             target = find_object(target)
-            patch = find_object(self.patch_func)
+            patch = find_object_obj(self.patch_func, self.path)
             patch = patch.cast(gdb.lookup_type("char").pointer())
         except:
             self.dlclose(self.lib_handle)
@@ -270,11 +280,11 @@ class Patch (gdb.Command):
                 patch_func = patch[2]
 
                 if patch[0] == 'O':
-                    self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+                    self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
                 elif patch[0] == 'L':
-                    self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, target_func, patch_func)
+                    self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
                 else:
-                    raise gdb.GdbError("Patching own and library functions is only supoorted for now.")
+                    raise gdb.GdbError("Patching own and library functions is only supported for now.")
 
                 self.strategy.do_patch()
                 self.strategy.write_backup(base + index*24)

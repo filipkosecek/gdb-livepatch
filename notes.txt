@@ -1,2 +1,9 @@
 -gdb nema tabulku symbolov pre libc (mozno je treba najst dlopen a dlclose ako samo)
 
+-zistit ktore kniznice su otvorene a vypis, refcount, zmenit interface patchovacej funkcie (urobit novy patch alebo sa vratit uz k otvorenej s moznostou vratit sa na zaciatok bez patchu)
+-zistit ci sa control flow nachadza v target funkcii
+-najst dlopen poriadne
+-skusit zmenit postup aby cielovy proces nemusel otvorit kniznicu (keby nemal pristup k suborovemu systemu)
+-odstranit bug s nazvom suboru
+-opravit bug v nasobnom aplikovani patchov
+-opravit trackovanie otvorenych kniznic

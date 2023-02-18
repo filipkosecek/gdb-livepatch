@@ -10,8 +10,8 @@ int main(void){
 	uint64_t x = 0;
 	
 	while(1){
-		target_function(&x);
 		printf("%lu\n", x);
+		target_function(&x);
 		sleep(1);
 	}
 
