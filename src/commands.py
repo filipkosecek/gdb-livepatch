@@ -1,53 +1,9 @@
 import gdb
+from datetime import datetime
 
+magic_constant = 153823877865751
+header_size = 32
 type_list = ["char", "uint64_t", "int32_t"]
-
-def find_patch_section_range(section_name: str, object_path: str) -> tuple[int, int]:
-    output = gdb.execute("maintenance info sections -all-objects " + section_name, False, True)
-    items = output.split("Object file:")
-    for item in items:
-        if item.find(object_path) != -1:
-            tmp = item
-            break
-    if not tmp:
-        raise gdb.GdbError("Couldn't find " + object_path + " object.")
-
-    index = tmp.find(section_name)
-    #find delimiter of section range
-    while index >= 0 and (tmp[index] != '-' or tmp[index+1] != '>'):
-        index -= 1
-    if index < 0:
-        gdb.GdbError("Couldn't find section address.")
-
-    #find section base address
-    section_beg_index = index
-    while section_beg_index >= 0 and tmp[section_beg_index] != 'x':
-        section_beg_index -= 1
-    if section_beg_index < 0:
-        gdb.GdbError("Couldn't find section address")
-    section_beg_index += 1
-
-    #copy section base address bytes and convert to int
-    section_beg = ""
-    while tmp[section_beg_index] != '-':
-        section_beg += tmp[section_beg_index]
-        section_beg_index += 1
-
-    #find section end address
-    section_end_index = index
-    while tmp[section_end_index] != 'x':
-        section_end_index += 1
-    section_end_index += 1
-
-    #build string
-    section_end = ""
-    while tmp[section_end_index] != ' ':
-        section_end += tmp[section_end_index]
-        section_end_index += 1
-
-    beg = int(section_beg, base=16)
-    end = int(section_end, base=16)
-    return beg, end - beg
 
 def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
@@ -65,6 +21,73 @@ def find_object(symbol_name: str) -> gdb.Value:
         raise gdb.GdbError("Couldn't find " + symbol_name + ".")
     else:
         return symbol
+
+class struct_header:
+    def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, id_array_len: int, patch_data_array_len: int, commands_len: int):
+        self.magic = magic
+        self.libhandle = libhandle
+        self.refcount = refcount
+        self.contains_log = contains_log
+        self.id_array_len = id_array_len
+        self.patch_data_array_len = patch_data_array_len
+        self.commands_len = commands_len
+
+def read_header(objfile_path: str) -> struct_header:
+    inferior = gdb.selected_inferior()
+    patchlib = gdb.lookup_objfile(objfile_path)
+    if patchlib is None:
+        return None
+
+    try:
+        header_addr = int(find_object_obj("patch_header", objfile_path).address)
+    except:
+        return None
+    buffer = inferior.read_memory(header_addr, header_size)
+    magic = int.from_bytes(buffer[:8], "little")
+    libhandle = int.from_bytes(buffer[8:16], "little")
+    refcount = int.from_bytes(buffer[16:18], "little")
+    contains_log = int.from_bytes(buffer[18:20], "little")
+    if contains_log == 0:
+        contains_log_bool = False
+    elif contains_log == 1:
+        contains_log_bool = True
+    else:
+        raise gdb.GdbError("Got wrong value for contains_log value.")
+    id_array_len = int.from_bytes(buffer[20:24], "little")
+    patch_data_array_len = int.from_bytes(buffer[24:28], "little")
+    commands_len = int.from_bytes(buffer[28:32], "little")
+    return struct_header(magic, libhandle, refcount, contains_log, id_array_len, patch_data_array_len, commands_len)
+
+def write_header(objfile_path: str, header: struct_header) -> None:
+    if header.magic != magic_constant:
+        raise gdb.GdbError("Got wrong value of magic constant while trying to write header.")
+
+    header_addr = int(find_object_obj("patch_header", objfile_path).address)
+
+    buffer = bytearray()
+    buffer.extend(header.magic.to_bytes(8, "little"))
+    buffer.extend(header.libhandle.to_bytes(8, "little"))
+    buffer.extend(header.refcount.to_bytes(2, "little"))
+    if header.contains_log:
+        tmp = 1
+    else:
+        tmp = 0
+    buffer.extend(tmp.to_bytes(2, "little"))
+    buffer.extend(header.id_array_len.to_bytes(4, "little"))
+    buffer.extend(header.patch_data_array_len.to_bytes(4, "little"))
+    buffer.extend(header.commands_len.to_bytes(4, "little"))
+
+    inferior = gdb.selected_inferior()
+    inferior.write_memory(header_addr, buffer, len(buffer))
+
+def find_log_lib() -> str:
+    for objfile in gdb.objfiles():
+        header = read_header(objfile.filename)
+        if header is None or header.magic != magic_constant:
+            continue
+        if header.contains_log:
+            return objfile.filename
+    return None
 
 class AbsoluteTrampoline:
     def __init__(self):
@@ -94,21 +117,6 @@ class PatchStrategy:
     
     def clean(self):
         pass
-
-    def write_backup(self, address: int):
-        pass
-
-    #this function writes a 32 byte block into .patch.backup section of patch library
-    #size of memcontent may vary hence padding_size
-    def write_backup(self, address: int, dest: int,  padding_size: int):
-        buffer = bytearray()
-        buffer.extend(dest.to_bytes(8, byteorder="little"))
-        padding = bytearray(padding_size)
-        padding[0] = padding_size
-        buffer.extend(padding)
-        buffer.extend(self.membackup)
-        inferior = gdb.selected_inferior()
-        inferior.write_memory(address, buffer, len(buffer))
 
 class PatchOwnStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str):
@@ -150,9 +158,6 @@ class PatchOwnStrategy (PatchStrategy):
     def clean(self):
         self.dlclose(self.lib_handle)
 
-    def write_backup(self, address: int):
-        super().write_backup(address, self.target_addr, 3)
-
 class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
@@ -192,20 +197,25 @@ class PatchLibStrategy (PatchStrategy):
     def clean(self):
         pass
 
-    def write_backup(self, address: int):
-        super().write_backup(address, self.addr_got, 8)
-
 class Patch (gdb.Command):
-    "Patch your functions."
+    "Patch functions."
 
     type_dict = {}
 
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
-    def extract_patch_metadata(self, section_beg: int, data_length: int) -> list[list[str]]:
+    def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
+        patchlib = gdb.lookup_objfile(objfile)
+        header = read_header(objfile)
+        if header is None:
+            #TODO
+            raise gdb.GdbError("Couldn't find header.")
+        commands_len = header.commands_len
+        commands = int(patchlib.lookup_global_symbol("patch_commands").value().address)
+
         inferior = gdb.selected_inferior()
-        items = inferior.read_memory(section_beg, data_length).tobytes().decode().split(";")
+        items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")
         result = []
         for item in items:
             #TODO
@@ -222,11 +232,18 @@ class Patch (gdb.Command):
         except:
             raise gdb.GdbError("Required types were not supported.")
  
+    #TODO check -> magic const must be equal to the one defined in C header
     def load_patch_lib(self, path: str):
         self.dlopen_ret = self.dlopen_addr(path, 2)
         if self.dlopen_ret == 0:
             raise gdb.GdbError("Couldn't open the patch library.")
-
+        header = read_header(path)
+        if header is None or header.magic != magic_constant:
+            self.dlclose_addr(self.dlopen_ret)
+            gdb.write("Object file " + path + " has a wrong format.")
+        header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
+        write_header(path, header)
+        
     def clean(self, objfile: str) -> None:
         rn = find_patch_section_range(".patch.backup", objfile)
         base = rn[0]
@@ -249,50 +266,31 @@ class Patch (gdb.Command):
 
         self.dlclose_addr(lib_handle)
 
+
     def invoke(self, arg, from_tty):
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
-        if len(argv) != 2:
-            raise gdb.GdbError("patch own takes two parameters")
+        if len(argv) != 1:
+            raise gdb.GdbError("patch takes one parameter")
 
         #find necessary objects
         self.dlopen_addr = find_object("dlopen")
         self.dlclose_addr = find_object("dlclose")
         self.is_patchable()
 
-        if argv[1] == "T":
-            self.load_patch_lib(argv[0])
-            span = find_patch_section_range(".patch", argv[0])
-            #we assume the last character is terminating 0
-            metadata = self.extract_patch_metadata(span[0], span[1]-1)
+        self.load_patch_lib(argv[0])
+        metadata = self.extract_patch_metadata(argv[0])
+        for patch in metadata:
+            target_func = patch[1]
+            patch_func = patch[2]
 
-            base = find_patch_section_range(".patch.backup", argv[0])[0]
-            index = 0
+            if patch[0] == 'O':
+                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
+            elif patch[0] == 'L':
+                self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
+            else:
+                raise gdb.GdbError("Patching own and library functions is only supported for now.")
 
-            inferior = gdb.selected_inferior()
-            lib_handle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
-            buffer = bytearray(lib_handle.to_bytes(8, byteorder="little"))
-            inferior.write_memory(base, buffer, len(buffer))
-            base += len(buffer)
-
-            for patch in metadata:
-                target_func = patch[1]
-                patch_func = patch[2]
-
-                if patch[0] == 'O':
-                    self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
-                elif patch[0] == 'L':
-                    self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
-                else:
-                    raise gdb.GdbError("Patching own and library functions is only supported for now.")
-
-                self.strategy.do_patch()
-                self.strategy.write_backup(base + index*24)
-                index += 1
-
-        elif argv[1] == "R":
-            self.clean(argv[0])
-        else:
-           raise gdb.GdbError("Unrecognized option.") 
+            self.strategy.do_patch()
 
 Patch()

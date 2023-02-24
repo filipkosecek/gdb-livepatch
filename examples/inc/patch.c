@@ -2,7 +2,7 @@
 #include "patch.h"
 
 void patch_function(uint64_t *x){
-	*x *= 2;
+	*x -= 1;
 }
 
 PATCH(
