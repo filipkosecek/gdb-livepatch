@@ -1,9 +1,12 @@
 import gdb
 from datetime import datetime
 
-magic_constant = 153823877865751
-header_size = 32
+MAGIC_CONSTANT = 153823877865751
+HEADER_SIZE = 32
+LOG_ENTRY_SIZE = 32
 type_list = ["char", "uint64_t", "int32_t"]
+LOG_SIZE = 2*4096
+PATCH_BACKUP_SIZE = 4096
 
 def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
@@ -23,14 +26,25 @@ def find_object(symbol_name: str) -> gdb.Value:
         return symbol
 
 class struct_header:
-    def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, id_array_len: int, patch_data_array_len: int, commands_len: int):
+    def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
         self.magic = magic
         self.libhandle = libhandle
         self.refcount = refcount
         self.contains_log = contains_log
-        self.id_array_len = id_array_len
+        #log entries count
+        self.log_entries_count = log_entries_count
+        #number of bytes ocuppied by membackup
         self.patch_data_array_len = patch_data_array_len
         self.commands_len = commands_len
+
+    def print(self):
+        print(self.magic)
+        print(self.libhandle)
+        print(self.refcount)
+        print(self.contains_log)
+        print(self.log_entries_count)
+        print(self.patch_data_array_len)
+        print(self.commands_len)
 
 def read_header(objfile_path: str) -> struct_header:
     inferior = gdb.selected_inferior()
@@ -42,8 +56,10 @@ def read_header(objfile_path: str) -> struct_header:
         header_addr = int(find_object_obj("patch_header", objfile_path).address)
     except:
         return None
-    buffer = inferior.read_memory(header_addr, header_size)
+    buffer = inferior.read_memory(header_addr, HEADER_SIZE)
     magic = int.from_bytes(buffer[:8], "little")
+    if magic != MAGIC_CONSTANT:
+        return None
     libhandle = int.from_bytes(buffer[8:16], "little")
     refcount = int.from_bytes(buffer[16:18], "little")
     contains_log = int.from_bytes(buffer[18:20], "little")
@@ -53,13 +69,13 @@ def read_header(objfile_path: str) -> struct_header:
         contains_log_bool = True
     else:
         raise gdb.GdbError("Got wrong value for contains_log value.")
-    id_array_len = int.from_bytes(buffer[20:24], "little")
+    log_entries_count = int.from_bytes(buffer[20:24], "little")
     patch_data_array_len = int.from_bytes(buffer[24:28], "little")
     commands_len = int.from_bytes(buffer[28:32], "little")
-    return struct_header(magic, libhandle, refcount, contains_log, id_array_len, patch_data_array_len, commands_len)
+    return struct_header(magic, libhandle, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
 
 def write_header(objfile_path: str, header: struct_header) -> None:
-    if header.magic != magic_constant:
+    if header.magic != MAGIC_CONSTANT:
         raise gdb.GdbError("Got wrong value of magic constant while trying to write header.")
 
     header_addr = int(find_object_obj("patch_header", objfile_path).address)
@@ -73,17 +89,128 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     else:
         tmp = 0
     buffer.extend(tmp.to_bytes(2, "little"))
-    buffer.extend(header.id_array_len.to_bytes(4, "little"))
+    buffer.extend(header.log_entries_count.to_bytes(4, "little"))
     buffer.extend(header.patch_data_array_len.to_bytes(4, "little"))
     buffer.extend(header.commands_len.to_bytes(4, "little"))
 
     inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
 
-def find_log_lib() -> str:
+class struct_log_entry:
+    def __init__(self, target_func_ptr: int,
+        patch_func_ptr: int,
+        patch_type: str,
+        timestamp: int,
+        patch_data_offset: int,
+        path_len: int,
+        membackup_len: int):
+        self.target_func_ptr = target_func_ptr
+        self.patch_func_ptr = patch_func_ptr
+        if patch_type != "O" and patch_type != "L":
+            raise gdb.GdbError("Got wrong patch type.")
+        if patch_type == "O":
+            self.patch_type = 0
+        else:
+            self.patch_type = 1
+        self.timestamp = timestamp
+        self.patch_data_offset = patch_data_offset
+        self.path_len = path_len
+        self.membackup_len = membackup_len
+
+def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
+    objfile = gdb.lookup_objfile(objfile_name)
+    header = read_header(objfile_name)
+    #TODO
+    if header.magic != MAGIC_CONSTANT or header.contains_log == False:
+        return None
+    if index*LOG_ENTRY_SIZE >= LOG_SIZE:
+        return None
+
+    log_address = int(find_object_obj("patch_log", objfile_name).address)
+    log_address += index*LOG_ENTRY_SIZE
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
+    target_func_ptr = int.from_bytes(buffer[0:8], "little")
+    patch_func_ptr = int.from_bytes(buffer[8:16], "little")
+    patch_type = int.from_bytes(buffer[16:18], "little")
+    if patch_type == 0:
+        patch_type_str = "O"
+    else:
+        patch_type_str = "L"
+    timestamp = int.from_bytes(buffer[18:22], "little")
+    patch_data_offset = int.from_bytes(buffer[22:26], "little")
+    path_len = int.from_bytes(buffer[26:28], "little")
+    membackup_len = int.from_bytes(buffer[28:32], "little")
+    return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, patch_data_offset, path_len, membackup_len)
+
+class struct_patch_backup:
+    def __init__(self, path: str, membackup: bytearray):
+        self.path = path
+        self.membackup = membackup
+
+def read_log_entry_data(objfile_path: str, index: int) -> struct_patch_backup:
+    log_entry = read_log_entry(objfile_path, index)
+    #no data
+    if log_entry.path_len == 0 and log_entry.membackup_len == 0:
+        return None
+    log_data_ptr = int(find_object_obj("patch_backup", objfile_path).address)
+    log_data_ptr += log_entry.patch_data_offset
+    buffer = bytearray(gdb.selected_inferior().read_memory(log_data_ptr, log_entry.path_len + log_entry.membackup_len))
+    return struct_patch_backup(buffer[0:log_entry.path_len].decode(), buffer[log_entry.path_len:(log_entry.path_len + log_entry.membackup_len)])
+
+def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
+    header = read_header(objfile_path)
+    log_entry_ptr = int(find_object_obj("patch_log", objfile_path).address)
+    patch_backup_ptr = int(find_object_obj("patch_backup", objfile_path).address)
+    log_size = header.log_entries_count*LOG_ENTRY_SIZE
+    backup_size = header.patch_data_array_len
+    log_entry_ptr += log_size
+    patch_backup_ptr += backup_size
+    #TODO at least print an error message
+    if log_size >= LOG_SIZE or backup_size >= PATCH_BACKUP_SIZE:
+        return None
+    header.log_entries_count += 1
+    offset = header.patch_data_array_len
+    if patch_backup is not None:
+        header.patch_data_array_len += len(patch_backup.path) + len(patch_backup.membackup)
+    header.print()
+    write_header(objfile_path, header)
+    if patch_backup is None:
+        log_entry.path_len = 0
+        log_entry.membackup_len = 0
+        log_entry.patch_data_offset = 0
+    else:
+        log_entry.path_len = len(patch_backup.path)
+        log_entry.membackup_len = len(patch_backup.membackup)
+        log_entry.patch_data_offset = offset
+
+    inferior = gdb.selected_inferior()
+    log_entry_buf = bytearray()
+    log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, "little"))
+    log_entry_buf.extend(log_entry.patch_func_ptr.to_bytes(8, "little"))
+    if log_entry.patch_type == "O":
+        tmp = 0
+    elif log_entry.patch_type == "L":
+        tmp = 1
+    else:
+        tmp = 1000
+
+    log_entry_buf.extend(tmp.to_bytes(2, "little"))
+    log_entry_buf.extend(log_entry.timestamp.to_bytes(4, "little"))
+    log_entry_buf.extend(log_entry.patch_data_offset.to_bytes(4, "little"))
+    log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
+    log_entry_buf.extend(log_entry.membackup_len.to_bytes(4, "little"))
+    inferior.write_memory(log_entry_ptr, log_entry_buf, len(log_entry_buf))
+
+    if patch_backup is not None:
+        backup_buf = bytearray(patch_backup.path.encode())
+        backup_buf.extend(patch_backup.membackup)
+        inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
+
+def find_master_lib() -> str:
     for objfile in gdb.objfiles():
         header = read_header(objfile.filename)
-        if header is None or header.magic != magic_constant:
+        if header is None:
             continue
         if header.contains_log:
             return objfile.filename
@@ -238,7 +365,7 @@ class Patch (gdb.Command):
         if self.dlopen_ret == 0:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
-        if header is None or header.magic != magic_constant:
+        if header is None or header.magic != MAGIC_CONSTANT:
             self.dlclose_addr(self.dlopen_ret)
             gdb.write("Object file " + path + " has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
