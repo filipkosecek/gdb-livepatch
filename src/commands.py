@@ -1,4 +1,5 @@
 import gdb
+import time
 from datetime import datetime
 
 MAGIC_CONSTANT = 153823877865751
@@ -101,7 +102,8 @@ class struct_log_entry:
         patch_func_ptr: int,
         patch_type: str,
         timestamp: int,
-        patch_data_offset: int,
+        path_offset: int,
+        membackup_offset: int,
         path_len: int,
         membackup_len: int):
         self.target_func_ptr = target_func_ptr
@@ -113,7 +115,8 @@ class struct_log_entry:
         else:
             self.patch_type = 1
         self.timestamp = timestamp
-        self.patch_data_offset = patch_data_offset
+        self.path_offset = path_offset
+        self.membackup_offset = membackup_offset
         self.path_len = path_len
         self.membackup_len = membackup_len
 
@@ -132,31 +135,43 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
     target_func_ptr = int.from_bytes(buffer[0:8], "little")
     patch_func_ptr = int.from_bytes(buffer[8:16], "little")
-    patch_type = int.from_bytes(buffer[16:18], "little")
+    patch_type = int.from_bytes(buffer[16:17], "little")
     if patch_type == 0:
         patch_type_str = "O"
     else:
         patch_type_str = "L"
-    timestamp = int.from_bytes(buffer[18:22], "little")
-    patch_data_offset = int.from_bytes(buffer[22:26], "little")
-    path_len = int.from_bytes(buffer[26:28], "little")
-    membackup_len = int.from_bytes(buffer[28:32], "little")
-    return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, patch_data_offset, path_len, membackup_len)
+    timestamp = int.from_bytes(buffer[17:21], "little")
+    path_offset = int.from_bytes(buffer[21:25], "little")
+    membackup_offset = int.from_bytes(buffer[25:29
+    path_len = int.from_bytes(buffer[29:31], "little")
+    membackup_len = int.from_bytes(buffer[31:32], "little")
+    return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, membackup_offset, path_len, membackup_len)
+
+def get_last_log_entry(master_lib: str) -> struct_log_entry:
+    hdr = read_header(master_lib)
+    return read_log_entry(master_lib, hdr.log_entries_count - 1)
 
 class struct_patch_backup:
     def __init__(self, path: str, membackup: bytearray):
         self.path = path
         self.membackup = membackup
 
-def read_log_entry_data(objfile_path: str, index: int) -> struct_patch_backup:
-    log_entry = read_log_entry(objfile_path, index)
+    def size(self) -> int:
+        result = 0
+        if self.path is not None:
+            result += len(self.path)
+        if self.membackup is not None:
+            result += len(self.membackup)
+        return result
+
+def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
     #no data
     if log_entry.path_len == 0 and log_entry.membackup_len == 0:
         return None
     log_data_ptr = int(find_object_obj("patch_backup", objfile_path).address)
-    log_data_ptr += log_entry.patch_data_offset
-    buffer = bytearray(gdb.selected_inferior().read_memory(log_data_ptr, log_entry.path_len + log_entry.membackup_len))
-    return struct_patch_backup(buffer[0:log_entry.path_len].decode(), buffer[log_entry.path_len:(log_entry.path_len + log_entry.membackup_len)])
+    path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
+    membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
+    return struct_patch_backup(path, membackup)
 
 def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
     header = read_header(objfile_path)
@@ -167,24 +182,26 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     log_entry_ptr += log_size
     patch_backup_ptr += backup_size
     #TODO at least print an error message
-    if log_size >= LOG_SIZE or backup_size >= PATCH_BACKUP_SIZE:
+    if log_size + LOG_ENTRY_SIZE > LOG_SIZE or backup_size + patch_backup.size() > PATCH_BACKUP_SIZE:
         return None
-    header.log_entries_count += 1
     offset = header.patch_data_array_len
-    if patch_backup is not None:
-        header.patch_data_array_len += len(patch_backup.path) + len(patch_backup.membackup)
-    header.print()
+    #update header
+    header.log_entries_count += 1
+    header.patch_data_array_len += patch_backup.size()
     write_header(objfile_path, header)
-    if patch_backup is None:
-        log_entry.path_len = 0
-        log_entry.membackup_len = 0
-        log_entry.patch_data_offset = 0
-    else:
-        log_entry.path_len = len(patch_backup.path)
-        log_entry.membackup_len = len(patch_backup.membackup)
-        log_entry.patch_data_offset = offset
 
     inferior = gdb.selected_inferior()
+    if patch_backup.path is not None:
+        backup_buf = bytearray(patch_backup.path.encode())
+        inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
+        patch_backup_ptr += len(backup_buf)
+        log_entry.path_offset = backup_size
+        backup_size += len(backup_buf)
+
+    if patch_backup.membackup is not None:
+        inferior.write(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
+        log_entry.membackup_offset = backup_size
+
     log_entry_buf = bytearray()
     log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, "little"))
     log_entry_buf.extend(log_entry.patch_func_ptr.to_bytes(8, "little"))
@@ -193,19 +210,15 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     elif log_entry.patch_type == "L":
         tmp = 1
     else:
-        tmp = 1000
+        tmp = 255
 
-    log_entry_buf.extend(tmp.to_bytes(2, "little"))
+    log_entry_buf.extend(tmp.to_bytes(1, "little"))
     log_entry_buf.extend(log_entry.timestamp.to_bytes(4, "little"))
-    log_entry_buf.extend(log_entry.patch_data_offset.to_bytes(4, "little"))
+    log_entry_buf.extend(log_entry.path_offset.to_bytes(4, "little"))
+    log_entry_buf.extend(log_entry.membackup_offset.to_bytes(4, "little"))
     log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
-    log_entry_buf.extend(log_entry.membackup_len.to_bytes(4, "little"))
+    log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
     inferior.write_memory(log_entry_ptr, log_entry_buf, len(log_entry_buf))
-
-    if patch_backup is not None:
-        backup_buf = bytearray(patch_backup.path.encode())
-        backup_buf.extend(patch_backup.membackup)
-        inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
 
 def find_master_lib() -> str:
     for objfile in gdb.objfiles():
@@ -239,7 +252,7 @@ class PatchStrategy:
         self.target_func = target_func
         self.patch_func = patch_func
 
-    def do_patch(self):
+    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         pass
     
     def clean(self):
@@ -249,7 +262,7 @@ class PatchOwnStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
-    def do_patch(self):
+    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         try:
             target_addr = find_object(self.target_func)
             self.target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
@@ -272,6 +285,24 @@ class PatchOwnStrategy (PatchStrategy):
             raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
+        #write to log
+        entry = struct_log_entry(self.target_addr, int(patch_addr), "O", int(time.time()), 0, 0, 0, 0)
+        backup = struct_patch_backup(None, None)
+        if path_offset != -1:
+            entry.path_offset = path_offset
+            entry.path_len = path_len
+        else:
+            backup.path = self.path
+            entry.path_len = len(self.path)
+
+        if membackup_offset != -1:
+            entry.membackup_offset = membackup_offset
+            entry.membackup_len = membackup_len
+        else:
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
+            entry.membackup_len = len(backup.membackup)
+        add_log_entry(master_lib, entry, backup)
+
         #write trampoline
         trampoline = AbsoluteTrampoline()
 
@@ -289,13 +320,15 @@ class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
-    def do_patch(self):
+    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         #find target and patch functions
         try:
             target = "'" + self.target_func + "@plt'"
             target = find_object(target)
+            target_ptr = int(target.cast(gdb.lookup_type("uint64_t")))
             patch = find_object_obj(self.patch_func, self.path)
             patch = patch.cast(gdb.lookup_type("char").pointer())
+            patch_ptr = int(patch.cast(gdb.lookup_type("uint64_t")))
         except:
             self.dlclose(self.lib_handle)
 
@@ -314,6 +347,24 @@ class PatchLibStrategy (PatchStrategy):
         addr_got += relative_addr
         self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
         patch_arr = int(patch).to_bytes(8, byteorder = "little")
+
+        #write to log
+        entry = struct_log_entry(self.target_ptr, patch_ptr, "L", int(time.time()), 0, 0, 0, 0)
+        backup = struct_patch_backup(None, None)
+        if path_offset != -1:
+            entry.path_offset = path_offset
+            entry.path_len = path_len
+        else:
+            backup.path = self.path
+            entry.path_len = len(self.path)
+
+        if membackup_offset != -1:
+            entry.membackup_offset = membackup_offset
+            entry.membackup_len = membackup_len
+        else:
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
+            entry.membackup_len = len(backup.membackup)
+        add_log_entry(master_lib, entry, backup)
 
         inferior = gdb.selected_inferior()
         #backup data
@@ -393,7 +444,6 @@ class Patch (gdb.Command):
 
         self.dlclose_addr(lib_handle)
 
-
     def invoke(self, arg, from_tty):
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
@@ -407,6 +457,11 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
+        counter = 0
+        master_lib = find_master_lib()
+        if master_lib is None:
+            master_lib = argv[0]
+
         for patch in metadata:
             target_func = patch[1]
             patch_func = patch[2]
@@ -418,6 +473,11 @@ class Patch (gdb.Command):
             else:
                 raise gdb.GdbError("Patching own and library functions is only supported for now.")
 
-            self.strategy.do_patch()
+            if counter == 0:
+                self.strategy.do_patch(master_lib, -1, 0, -1, 0)
+                first_entry = get_last_log_entry(master_lib).
+            else:
+                self.strategy.do_patch(master_lib, first_entry.path_offset, first_entry.path_len, -1, 0)
+            counter += 1
 
 Patch()
