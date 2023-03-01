@@ -110,15 +110,19 @@ class struct_log_entry:
         self.patch_func_ptr = patch_func_ptr
         if patch_type != "O" and patch_type != "L":
             raise gdb.GdbError("Got wrong patch type.")
-        if patch_type == "O":
-            self.patch_type = 0
-        else:
-            self.patch_type = 1
+        self.patch_type = patch_type
         self.timestamp = timestamp
         self.path_offset = path_offset
         self.membackup_offset = membackup_offset
         self.path_len = path_len
         self.membackup_len = membackup_len
+
+    def to_string(self, master_lib_path: str):
+        master_lib = gdb.lookup_objfile(master_lib_path)
+        backup_ptr = int(find_object_obj("patch_backup", master_lib_path).address)
+        backup_ptr += self.path_offset
+        path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
+        return str(datetime.fromtimestamp(self.timestamp)) + ": " + str(self.patch_type) + "    " + hex(self.target_func_ptr) + " -> " + path + ":"  + hex(self.patch_func_ptr)
 
 def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     objfile = gdb.lookup_objfile(objfile_name)
@@ -224,7 +228,10 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
 
 def find_master_lib() -> str:
     for objfile in gdb.objfiles():
-        header = read_header(objfile.filename)
+        try:
+            header = read_header(objfile.filename)
+        except:
+            continue
         if header is None:
             continue
         if header.contains_log:
@@ -449,6 +456,9 @@ class Patch (gdb.Command):
 
         self.dlclose_addr(lib_handle)
 
+    def complete(self, text, word):
+        return gdb.COMPLETE_FILENAME
+
     def invoke(self, arg, from_tty):
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
@@ -463,14 +473,12 @@ class Patch (gdb.Command):
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
         counter = 0
-        master_lib = argv[0]
-        #TODO
+        master_lib = find_master_lib()
+        if master_lib is None:
+            master_lib = argv[0]
         tmp = read_header(master_lib)
         tmp.contains_log = True
         write_header(master_lib, tmp)
-        #master_lib = find_master_lib()
-        #if master_lib is None:
-            #master_lib = argv[0]
 
         for patch in metadata:
             target_func = patch[1]
@@ -493,4 +501,21 @@ class Patch (gdb.Command):
         hdr.refcount = counter
         write_header(argv[0], hdr)
 
+class PatchLog(gdb.Command):
+    def __init__(self):
+        super(PatchLog, self).__init__("patch-log", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        argv = gdb.string_to_argv(arg)
+        if len(argv) != 0:
+            raise gdb.GdbError("patch-log takes no parameters")
+
+        #TODO hardcoded for now
+        master_lib_path = find_master_lib()
+        header = read_header(master_lib_path)
+        for i in range(header.log_entries_count):
+            entry = read_log_entry(master_lib_path, i)
+            print(entry.to_string(master_lib_path))
+
 Patch()
+PatchLog()
