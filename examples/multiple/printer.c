@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include "patch.h"
 
-void pretty_printer(uint64_t x){
+__attribute__((unused)) static void pretty_printer(uint64_t x){
 	printf("The current value is: %lu\n", x);
 }
 

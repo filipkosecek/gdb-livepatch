@@ -9,6 +9,15 @@ type_list = ["char", "uint64_t", "int32_t"]
 LOG_SIZE = 2*4096
 PATCH_BACKUP_SIZE = 4096
 
+def find_object_static(symbol_name: str, objfile_name: str) -> gdb.Value:
+    try:
+        objfile = gdb.lookup_objfile(objfile_name)
+        symbol = objfile.lookup_static_symbol(symbol_name).value()
+    except:
+        raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
+    else:
+        return symbol
+
 def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
         objfile = gdb.lookup_objfile(objfile_name)
@@ -54,7 +63,7 @@ def read_header(objfile_path: str) -> struct_header:
         return None
 
     try:
-        header_addr = int(find_object_obj("patch_header", objfile_path).address)
+        header_addr = int(find_object_static("patch_header", objfile_path).address)
     except:
         return None
     buffer = inferior.read_memory(header_addr, HEADER_SIZE)
@@ -79,7 +88,7 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     if header.magic != MAGIC_CONSTANT:
         raise gdb.GdbError("Got wrong value of magic constant while trying to write header.")
 
-    header_addr = int(find_object_obj("patch_header", objfile_path).address)
+    header_addr = int(find_object_static("patch_header", objfile_path).address)
 
     buffer = bytearray()
     buffer.extend(header.magic.to_bytes(8, "little"))
@@ -119,7 +128,7 @@ class struct_log_entry:
 
     def to_string(self, master_lib_path: str):
         master_lib = gdb.lookup_objfile(master_lib_path)
-        backup_ptr = int(find_object_obj("patch_backup", master_lib_path).address)
+        backup_ptr = int(find_object_static("patch_backup", master_lib_path).address)
         backup_ptr += self.path_offset
         path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
         return str(datetime.fromtimestamp(self.timestamp)) + ": " + str(self.patch_type) + "    " + hex(self.target_func_ptr) + " -> " + path + ":"  + hex(self.patch_func_ptr)
@@ -135,7 +144,7 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     if index*LOG_ENTRY_SIZE >= LOG_SIZE:
         return None
 
-    log_address = int(find_object_obj("patch_log", objfile_name).address)
+    log_address = int(find_object_static("patch_log", objfile_name).address)
     log_address += index*LOG_ENTRY_SIZE
     inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
@@ -174,15 +183,15 @@ def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
     #no data
     if log_entry.path_len == 0 and log_entry.membackup_len == 0:
         return None
-    log_data_ptr = int(find_object_obj("patch_backup", objfile_path).address)
+    log_data_ptr = int(find_object_static("patch_backup", objfile_path).address)
     path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
     membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
     return struct_patch_backup(path, membackup)
 
 def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
     header = read_header(objfile_path)
-    log_entry_ptr = int(find_object_obj("patch_log", objfile_path).address)
-    patch_backup_ptr = int(find_object_obj("patch_backup", objfile_path).address)
+    log_entry_ptr = int(find_object_static("patch_log", objfile_path).address)
+    patch_backup_ptr = int(find_object_static("patch_backup", objfile_path).address)
     log_size = header.log_entries_count*LOG_ENTRY_SIZE
     backup_size = header.patch_data_array_len
     log_entry_ptr += log_size
@@ -289,7 +298,7 @@ class PatchOwnStrategy (PatchStrategy):
 
         #try to resolve symbol for patch function
         try:
-            patch_addr = find_object_obj(self.patch_func, self.path).cast(gdb.lookup_type("uint64_t"))
+            patch_addr = find_object_static(self.patch_func, self.path).cast(gdb.lookup_type("uint64_t"))
         except:
             raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
@@ -335,7 +344,7 @@ class PatchLibStrategy (PatchStrategy):
             target = "'" + self.target_func + "@plt'"
             target = find_object(target)
             target_ptr = int(target.cast(gdb.lookup_type("uint64_t")))
-            patch = find_object_obj(self.patch_func, self.path)
+            patch = find_object_static(self.patch_func, self.path)
             patch = patch.cast(gdb.lookup_type("char").pointer())
             patch_ptr = int(patch.cast(gdb.lookup_type("uint64_t")))
         except:
@@ -402,7 +411,7 @@ class Patch (gdb.Command):
             #TODO
             raise gdb.GdbError("Couldn't find header.")
         commands_len = header.commands_len
-        commands = int(patchlib.lookup_global_symbol("patch_commands").value().address)
+        commands = int(patchlib.lookup_static_symbol("patch_commands").value().address)
 
         inferior = gdb.selected_inferior()
         items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")

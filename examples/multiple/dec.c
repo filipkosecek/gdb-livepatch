@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include "patch.h"
 
-void patch_function(uint64_t *x){
+__attribute__((unused)) static void patch_function(uint64_t *x){
 	*x -= 1;
 }
 

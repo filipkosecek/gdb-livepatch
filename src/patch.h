@@ -13,12 +13,12 @@
 #define PATCH_LIB(orig, replace) "L:" #orig ":" #replace ";"
 
 #define PATCH(__X) \
-char patch_header[HEADER_SIZE] __attribute__((section(".patch"))) = {0}; \
-char patch_commands[] __attribute__((section(".patch"))) = __X; \
-char patch_log[LOG_SIZE] __attribute__((section(".patch"))) = {0}; \
-char patch_backup[PAGE_SIZE] __attribute__((section(".patch"))) = {0}; \
+static char patch_header[HEADER_SIZE] __attribute__((section(".patch"))) = {0}; \
+static char patch_commands[] __attribute__((section(".patch"))) = __X; \
+__attribute__((unused)) static char patch_log[LOG_SIZE] __attribute__((section(".patch"))) = {0}; \
+__attribute__((unused)) static char patch_backup[PAGE_SIZE] __attribute__((section(".patch"))) = {0}; \
 \
-static void __attribute__((constructor)) lib_init(void){ \
+__attribute__((constructor)) static void lib_init(void){ \
 	uint64_t magic_constant = MAGIC_CONST; \
 	uint32_t commands_len; \
 \
