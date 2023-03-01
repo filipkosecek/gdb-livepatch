@@ -122,6 +122,8 @@ class struct_log_entry:
 
 def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     objfile = gdb.lookup_objfile(objfile_name)
+    if objfile is None:
+        return None
     header = read_header(objfile_name)
     #TODO
     if header.magic != MAGIC_CONSTANT or header.contains_log == False:
@@ -142,7 +144,7 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
         patch_type_str = "L"
     timestamp = int.from_bytes(buffer[17:21], "little")
     path_offset = int.from_bytes(buffer[21:25], "little")
-    membackup_offset = int.from_bytes(buffer[25:29
+    membackup_offset = int.from_bytes(buffer[25:29], "little")
     path_len = int.from_bytes(buffer[29:31], "little")
     membackup_len = int.from_bytes(buffer[31:32], "little")
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, membackup_offset, path_len, membackup_len)
@@ -199,7 +201,7 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
         backup_size += len(backup_buf)
 
     if patch_backup.membackup is not None:
-        inferior.write(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
+        inferior.write_memory(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
         log_entry.membackup_offset = backup_size
 
     log_entry_buf = bytearray()
@@ -384,7 +386,10 @@ class Patch (gdb.Command):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
     def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
-        patchlib = gdb.lookup_objfile(objfile)
+        try:
+            patchlib = gdb.lookup_objfile(objfile)
+        except:
+            print("error in extract_patch_meta")
         header = read_header(objfile)
         if header is None:
             #TODO
@@ -458,9 +463,14 @@ class Patch (gdb.Command):
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
         counter = 0
-        master_lib = find_master_lib()
-        if master_lib is None:
-            master_lib = argv[0]
+        master_lib = argv[0]
+        #TODO
+        tmp = read_header(master_lib)
+        tmp.contains_log = True
+        write_header(master_lib, tmp)
+        #master_lib = find_master_lib()
+        #if master_lib is None:
+            #master_lib = argv[0]
 
         for patch in metadata:
             target_func = patch[1]
@@ -475,9 +485,12 @@ class Patch (gdb.Command):
 
             if counter == 0:
                 self.strategy.do_patch(master_lib, -1, 0, -1, 0)
-                first_entry = get_last_log_entry(master_lib).
+                first_entry = get_last_log_entry(master_lib)
             else:
                 self.strategy.do_patch(master_lib, first_entry.path_offset, first_entry.path_len, -1, 0)
             counter += 1
+        hdr = read_header(argv[0])
+        hdr.refcount = counter
+        write_header(argv[0], hdr)
 
 Patch()
