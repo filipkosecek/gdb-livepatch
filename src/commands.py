@@ -112,6 +112,7 @@ class struct_log_entry:
         patch_type: str,
         timestamp: int,
         path_offset: int,
+        is_active: bool,
         membackup_offset: int,
         path_len: int,
         membackup_len: int):
@@ -122,6 +123,7 @@ class struct_log_entry:
         self.patch_type = patch_type
         self.timestamp = timestamp
         self.path_offset = path_offset
+        self.is_active = is_active
         self.membackup_offset = membackup_offset
         self.path_len = path_len
         self.membackup_len = membackup_len
@@ -131,7 +133,10 @@ class struct_log_entry:
         backup_ptr = int(find_object_static("patch_backup", master_lib_path).address)
         backup_ptr += self.path_offset
         path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
-        return str(datetime.fromtimestamp(self.timestamp)) + ": " + str(self.patch_type) + "    " + hex(self.target_func_ptr) + " -> " + path + ":"  + hex(self.patch_func_ptr)
+        tmp = " "
+        if self.is_active:
+            tmp = "* "
+        return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", str(self.patch_type), " ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
 
 def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     objfile = gdb.lookup_objfile(objfile_name)
@@ -157,10 +162,18 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
         patch_type_str = "L"
     timestamp = int.from_bytes(buffer[17:21], "little")
     path_offset = int.from_bytes(buffer[21:25], "little")
-    membackup_offset = int.from_bytes(buffer[25:29], "little")
+    is_active_int = int.from_bytes(buffer[25:27], "little")
+    if is_active_int == 0:
+        is_active = False
+    elif is_active_int == 1:
+        is_active = True
+    else:
+        raise gdb.GdbError("Got wrong value of is_active")
+
+    membackup_offset = int.from_bytes(buffer[27:29], "little")
     path_len = int.from_bytes(buffer[29:31], "little")
     membackup_len = int.from_bytes(buffer[31:32], "little")
-    return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, membackup_offset, path_len, membackup_len)
+    return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
 def get_last_log_entry(master_lib: str) -> struct_log_entry:
     hdr = read_header(master_lib)
@@ -230,7 +243,12 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     log_entry_buf.extend(tmp.to_bytes(1, "little"))
     log_entry_buf.extend(log_entry.timestamp.to_bytes(4, "little"))
     log_entry_buf.extend(log_entry.path_offset.to_bytes(4, "little"))
-    log_entry_buf.extend(log_entry.membackup_offset.to_bytes(4, "little"))
+    if log_entry.is_active:
+        tmp = 1
+    else:
+        tmp = 0
+    log_entry_buf.extend(tmp.to_bytes(2, "little"))
+    log_entry_buf.extend(log_entry.membackup_offset.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
     inferior.write_memory(log_entry_ptr, log_entry_buf, len(log_entry_buf))
@@ -304,7 +322,7 @@ class PatchOwnStrategy (PatchStrategy):
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
 
         #write to log
-        entry = struct_log_entry(self.target_addr, int(patch_addr), "O", int(time.time()), 0, 0, 0, 0)
+        entry = struct_log_entry(self.target_addr, int(patch_addr), "O", int(time.time()), 0, True, 0, 0, 0)
         backup = struct_patch_backup(None, None)
         if path_offset != -1:
             entry.path_offset = path_offset
@@ -367,7 +385,7 @@ class PatchLibStrategy (PatchStrategy):
         patch_arr = int(patch).to_bytes(8, byteorder = "little")
 
         #write to log
-        entry = struct_log_entry(self.target_ptr, patch_ptr, "L", int(time.time()), 0, 0, 0, 0)
+        entry = struct_log_entry(self.target_ptr, patch_ptr, "L", int(time.time()), 0, True, 0, 0, 0)
         backup = struct_patch_backup(None, None)
         if path_offset != -1:
             entry.path_offset = path_offset
@@ -524,7 +542,7 @@ class PatchLog(gdb.Command):
         header = read_header(master_lib_path)
         for i in range(header.log_entries_count):
             entry = read_log_entry(master_lib_path, i)
-            print(entry.to_string(master_lib_path))
+            print("[" + str(i) + "]" + entry.to_string(master_lib_path))
 
 Patch()
 PatchLog()
