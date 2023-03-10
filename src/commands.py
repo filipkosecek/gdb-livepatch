@@ -192,7 +192,7 @@ class struct_patch_backup:
             result += len(self.membackup)
         return result
 
-def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
+def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struct_patch_backup:
     #no data
     if log_entry.path_len == 0 and log_entry.membackup_len == 0:
         return None
@@ -252,6 +252,20 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
     inferior.write_memory(log_entry_ptr, log_entry_buf, len(log_entry_buf))
+
+def find_last_patch(master_lib: str, func_address: int) -> str:
+    hdr = read_header(master_lib)
+    i = hdr.log_entries_count - 1
+    result = None
+    while i >= 0:
+        entry = read_log_entry(master_lib, i)
+        if entry is None:
+            return None
+        if entry.target_func_ptr == func_address:
+            result = read_log_entry_data(master_lib, entry).path
+            print(result)
+        i -= 1
+    return result
 
 def find_master_lib() -> str:
     for objfile in gdb.objfiles():
@@ -398,7 +412,7 @@ class PatchLibStrategy (PatchStrategy):
             entry.membackup_offset = membackup_offset
             entry.membackup_len = membackup_len
         else:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_ptr, 8))
             entry.membackup_len = len(backup.membackup)
         add_log_entry(master_lib, entry, backup)
 
