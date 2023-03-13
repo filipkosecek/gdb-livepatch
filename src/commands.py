@@ -136,7 +136,7 @@ class struct_log_entry:
         tmp = " "
         if self.is_active:
             tmp = "* "
-        return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", str(self.patch_type), " ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
+        return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
 
 def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     objfile = gdb.lookup_objfile(objfile_name)
@@ -175,60 +175,10 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     membackup_len = int.from_bytes(buffer[31:32], "little")
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
-def get_last_log_entry(master_lib: str) -> struct_log_entry:
-    hdr = read_header(master_lib)
-    return read_log_entry(master_lib, hdr.log_entries_count - 1)
-
-class struct_patch_backup:
-    def __init__(self, path: str, membackup: bytearray):
-        self.path = path
-        self.membackup = membackup
-
-    def size(self) -> int:
-        result = 0
-        if self.path is not None:
-            result += len(self.path)
-        if self.membackup is not None:
-            result += len(self.membackup)
-        return result
-
-def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struct_patch_backup:
-    #no data
-    if log_entry.path_len == 0 and log_entry.membackup_len == 0:
-        return None
-    log_data_ptr = int(find_object_static("patch_backup", objfile_path).address)
-    path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
-    membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
-    return struct_patch_backup(path, membackup)
-
-def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
-    header = read_header(objfile_path)
-    log_entry_ptr = int(find_object_static("patch_log", objfile_path).address)
-    patch_backup_ptr = int(find_object_static("patch_backup", objfile_path).address)
-    log_size = header.log_entries_count*LOG_ENTRY_SIZE
-    backup_size = header.patch_data_array_len
-    log_entry_ptr += log_size
-    patch_backup_ptr += backup_size
-    #TODO at least print an error message
-    if log_size + LOG_ENTRY_SIZE > LOG_SIZE or backup_size + patch_backup.size() > PATCH_BACKUP_SIZE:
-        return None
-    offset = header.patch_data_array_len
-    #update header
-    header.log_entries_count += 1
-    header.patch_data_array_len += patch_backup.size()
-    write_header(objfile_path, header)
-
-    inferior = gdb.selected_inferior()
-    if patch_backup.path is not None:
-        backup_buf = bytearray(patch_backup.path.encode())
-        inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
-        patch_backup_ptr += len(backup_buf)
-        log_entry.path_offset = backup_size
-        backup_size += len(backup_buf)
-
-    if patch_backup.membackup is not None:
-        inferior.write_memory(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
-        log_entry.membackup_offset = backup_size
+def write_log_entry(master_lib: str, log_entry: struct_log_entry, index: int) -> None:
+    objfile = gdb.lookup_objfile(master_lib)
+    log_ptr = int(objfile.lookup_static_symbol("patch_log").value().address)
+    log_ptr += index*LOG_ENTRY_SIZE
 
     log_entry_buf = bytearray()
     log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, "little"))
@@ -251,8 +201,66 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     log_entry_buf.extend(log_entry.membackup_offset.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
-    inferior.write_memory(log_entry_ptr, log_entry_buf, len(log_entry_buf))
+    gdb.selected_inferior().write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
+def get_last_log_entry(master_lib: str) -> struct_log_entry:
+    hdr = read_header(master_lib)
+    return read_log_entry(master_lib, hdr.log_entries_count - 1)
+
+class struct_patch_backup:
+    def __init__(self, path: str, membackup: bytearray):
+        self.path = path
+        self.membackup = membackup
+
+    def size(self) -> int:
+        result = 0
+        if self.path is not None:
+            result += len(self.path)
+        if self.membackup is not None:
+            result += len(self.membackup)
+        return result
+
+def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struct_patch_backup:
+    path = None
+    membackup = None
+    log_data_ptr = int(find_object_static("patch_backup", objfile_path).address)
+    if log_entry.path_len != 0:
+        path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
+    if log_entry.membackup_len != 0:
+        membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
+    return struct_patch_backup(path, membackup)
+
+def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
+    header = read_header(objfile_path)
+    index = header.log_entries_count
+    patch_backup_ptr = int(find_object_static("patch_backup", objfile_path).address)
+    log_size = header.log_entries_count*LOG_ENTRY_SIZE
+    backup_size = header.patch_data_array_len
+    patch_backup_ptr += backup_size
+    #TODO at least print an error message
+    if log_size + LOG_ENTRY_SIZE > LOG_SIZE or backup_size + patch_backup.size() > PATCH_BACKUP_SIZE:
+        return None
+    offset = header.patch_data_array_len
+    #update header
+    header.log_entries_count += 1
+    header.patch_data_array_len += patch_backup.size()
+    write_header(objfile_path, header)
+
+    inferior = gdb.selected_inferior()
+    if patch_backup.path is not None:
+        backup_buf = bytearray(patch_backup.path.encode())
+        inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
+        patch_backup_ptr += len(backup_buf)
+        log_entry.path_offset = backup_size
+        backup_size += len(backup_buf)
+
+    if patch_backup.membackup is not None:
+        inferior.write_memory(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
+        log_entry.membackup_offset = backup_size
+
+    write_log_entry(objfile_path, log_entry, index)
+
+#TODO also sets log is_active flag
 def find_last_patch(master_lib: str, func_address: int) -> str:
     hdr = read_header(master_lib)
     i = hdr.log_entries_count - 1
@@ -261,11 +269,23 @@ def find_last_patch(master_lib: str, func_address: int) -> str:
         entry = read_log_entry(master_lib, i)
         if entry is None:
             return None
-        if entry.target_func_ptr == func_address:
+        if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(master_lib, entry).path
-            print(result)
+            entry.is_active = False
+            write_log_entry(master_lib, entry, i)
         i -= 1
     return result
+
+def steal_refcount(master_lib: str, func_address: int, current_lib: str):
+    lib = find_last_patch(master_lib, func_address)
+    if lib is not None:
+        lib_hdr = read_header(lib)
+        lib_hdr.refcount -= 1
+        write_header(lib, lib_hdr)
+
+    current = read_header(current_lib)
+    current.refcount += 1
+    write_header(current_lib, current)
 
 def find_master_lib() -> str:
     for objfile in gdb.objfiles():
@@ -291,6 +311,10 @@ class AbsoluteTrampoline:
             self.trampoline[i+2] = addr[i]
 
     def write_trampoline(self, address: gdb.Value):
+        inferior = gdb.selected_inferior()
+        inferior.write_memory(address, self.trampoline, 13)
+
+    def write_trampoline_int(self, address: int):
         inferior = gdb.selected_inferior()
         inferior.write_memory(address, self.trampoline, 13)
 
@@ -334,6 +358,9 @@ class PatchOwnStrategy (PatchStrategy):
         except:
             raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = int(patch_addr).to_bytes(8, byteorder = "little")
+
+        #steal refcount
+        steal_refcount(master_lib, self.target_addr, self.path)
 
         #write to log
         entry = struct_log_entry(self.target_addr, int(patch_addr), "O", int(time.time()), 0, True, 0, 0, 0)
@@ -397,6 +424,9 @@ class PatchLibStrategy (PatchStrategy):
         addr_got += relative_addr
         self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
         patch_arr = int(patch).to_bytes(8, byteorder = "little")
+
+        #steal refcount
+        steal_refcount(master_lib, target_ptr, self.path)
 
         #write to log
         entry = struct_log_entry(self.target_ptr, patch_ptr, "L", int(time.time()), 0, True, 0, 0, 0)
@@ -513,13 +543,13 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
-        counter = 0
         master_lib = find_master_lib()
         if master_lib is None:
             master_lib = argv[0]
         tmp = read_header(master_lib)
         tmp.contains_log = True
         write_header(master_lib, tmp)
+        counter = 0
 
         for patch in metadata:
             target_func = patch[1]
@@ -538,9 +568,6 @@ class Patch (gdb.Command):
             else:
                 self.strategy.do_patch(master_lib, first_entry.path_offset, first_entry.path_len, -1, 0)
             counter += 1
-        hdr = read_header(argv[0])
-        hdr.refcount = counter
-        write_header(argv[0], hdr)
 
 class PatchLog(gdb.Command):
     def __init__(self):
@@ -551,12 +578,64 @@ class PatchLog(gdb.Command):
         if len(argv) != 0:
             raise gdb.GdbError("patch-log takes no parameters")
 
-        #TODO hardcoded for now
+        print("[0] revert")
+
         master_lib_path = find_master_lib()
         header = read_header(master_lib_path)
         for i in range(header.log_entries_count):
             entry = read_log_entry(master_lib_path, i)
-            print("[" + str(i) + "]" + entry.to_string(master_lib_path))
+            print("[" + str(i+1) + "]" + entry.to_string(master_lib_path))
+
+class ReapplyPatch(gdb.Command):
+    def __init__(self):
+        super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        argv = gdb.string_to_argv(arg)
+        if len(argv) != 1:
+            raise gdb.GdbError("patch-reapply takes one parameter")
+        index = int(argv[0])
+        if index == 0:
+            #TODO revert
+            pass
+
+        index -= 1
+
+        master_lib = find_master_lib()
+        if master_lib is None:
+            raise gdb.GdbError("Couldn't find the log, master library is not present.")
+
+        log_entry = read_log_entry(master_lib, index)
+        if log_entry is None:
+            raise gdb.GdbError("The log entry does not exist.")
+
+        #nothing to do
+        if log_entry.is_active:
+            return
+
+        #check if the library is still open
+        data = read_log_entry_data(master_lib, log_entry)
+        if data.path is None:
+            gdb.GdbError("Failed to fetch patchlib path.")
+        if gdb.lookup_objfile(data.path) is None:
+            #the lib is unmapped
+            raise gdb.GdbError("The library has been closed. Cannot apply the patch.")
+        if log_entry.patch_type == "O":
+            trampoline = AbsoluteTrampoline()
+            trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
+            trampoline.write_trampoline_int(log_entry.target_func_ptr)
+        elif log_entry.patch_type == "L":
+            instruction_ptr = log_entry.target_func_ptr + 2
+            inferior = gdb.selected_inferior()
+            relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), "little")
+            instruction_ptr += 4
+            got_entry = instruction_ptr + relative_offset
+            inferior.write(log_entry.patch_func_ptr.to_bytes(8, "little"))
+
+        steal_refcount(master_lib, log_entry.target_func_ptr, data.path)
+        log_entry.is_active = True
+        write_log_entry(master_lib, log_entry, index)
 
 Patch()
 PatchLog()
+ReapplyPatch()

@@ -11,6 +11,9 @@ dec: dec.c
 printer: printer.c
 	gcc -g -o printer.so printer.c -Wall -W -Werror -fPIC -shared -I../../src/
 
+mult: mult.c
+	gcc -g -o mult.so mult.c -Wall -W -Werror -fPIC -shared -I../../src/
+
 clean:
 	rm inc
 	rm dec.so
