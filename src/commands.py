@@ -586,24 +586,63 @@ class PatchLog(gdb.Command):
             entry = read_log_entry(master_lib_path, i)
             print("[" + str(i+1) + "]" + entry.to_string(master_lib_path))
 
+#WARNING!!! sets found library as inactive
+#TODO poor design
+def find_active_entry(master_lib: str, func_address: int) -> struct_log_entry:
+    size = read_header(master_lib).log_entries_count
+    for i in range(size):
+        entry = read_log_entry(master_lib, i)
+        #TODO when applying a patch you must scan if a function has been patched to assign the corresponding memory backup
+        if entry.target_func_ptr == func_address and entry.is_active:
+            entry.is_active = False
+            write_log_entry(master_lib, entry, i)
+            return entry
+    return None
+
 class ReapplyPatch(gdb.Command):
     def __init__(self):
         super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
 
+    def revert(self, argv: list[str], master_lib: str):
+        i = 1
+        while i < len(argv):
+            try:
+                function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
+            except:
+                function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+            entry = find_active_entry(master_lib, function_address)
+            if entry is None:
+                print("Nothing to revert.")
+            membackup = read_log_entry_data(master_lib, entry).membackup
+            inferior = gdb.selected_inferior()
+            if membackup is None:
+                raise gdb.GdbError("Fatal error, couldn't find membackup.")
+            if entry.patch_type == "O":
+                #TODO only absolute trampoline for now
+                inferior.write_memory(function_address, membackup, len(membackup))
+            elif entry.patch_type == "L":
+                instruction = function_address + 2
+                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little")
+                got_entry = function_address + 6 + relative_offset
+                inferior.write_memory(got_entry, membackup, len(membackup))
+
+            i += 1
+
     def invoke(self, arg, from_tty):
         argv = gdb.string_to_argv(arg)
-        if len(argv) != 1:
-            raise gdb.GdbError("patch-reapply takes one parameter")
-        index = int(argv[0])
-        if index == 0:
-            #TODO revert
-            pass
-
-        index -= 1
-
+        if len(arg) < 1:
+           raise gdb.GdbError("patch-reapply takes one parameter")
         master_lib = find_master_lib()
         if master_lib is None:
             raise gdb.GdbError("Couldn't find the log, master library is not present.")
+
+        index = int(argv[0])
+        if index == 0:
+            #TODO revert
+            self.revert(argv, master_lib)
+            return
+
+        index -= 1
 
         log_entry = read_log_entry(master_lib, index)
         if log_entry is None:
