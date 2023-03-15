@@ -276,12 +276,62 @@ def find_last_patch(master_lib: str, func_address: int) -> str:
         i -= 1
     return result
 
+def find_first_patch(master_lib: str, func_address: int) -> struct_log_entry:
+    hdr = read_header(master_lib)
+    for i in range(hdr.log_entries_count):
+        entry = read_log_entry(master_lib, i)
+        if entry is None:
+            return None
+        if entry.target_func_ptr == func_address:
+            return entry
+    return None
+
+def copy_log(dest: str, src: str):
+    src_log = int(find_object_static("patch_log", src).address)
+    src_backup = int(find_object_static("patch_backup", src).address)
+    dest_log = int(find_object_static("patch_log", dest).address)
+    dest_backup = int(find_object_static("patch_backup", dest).address)
+    src_hdr = read_header(src)
+    dest_hdr = read_header(dest)
+    dest_hdr.contains_log = True
+    dest_hdr.log_entries_count = src_hdr.log_entries_count
+    dest_hdr.patch_data_array_len = src_hdr.patch_data_array_len
+    inferior = gdb.selected_inferior()
+    log_buffer = bytearray(inferior.read_memory(src_log, src_hdr.log_entries_count*LOG_ENTRY_SIZE))
+    backup_buffer = bytearray(inferior.read_memory(src_backup, src_hdr.patch_data_array_len))
+    inferior.write_memory(dest_log, log_buffer, len(log_buffer))
+    inferior.write_memory(dest_backup, backup_buffer, len(backup_buffer))
+
+def close_lib(lib: str):
+    hdr = read_header(lib)
+    if hdr.contains_log:
+        hdr.contains_log = False
+        write_header(lib, hdr)
+        for objfile in gdb.objfiles():
+            try:
+                header = read_header(objfile.filename)
+            except:
+                continue
+            if header is None:
+                continue
+            if header.magic == MAGIC_CONSTANT:
+               copy_log(objfile.filename, lib)
+    dlclose = find_object("dlclose")
+    dlclose(hdr.libhandle)
+
+def decrease_refcount(lib: str):
+    hdr = read_header(lib)
+    hdr.refcount -= 1
+    write_header(lib, hdr)
+    if hdr.refcount <= 0:
+        close_lib(lib)
+
 def steal_refcount(master_lib: str, func_address: int, current_lib: str):
     lib = find_last_patch(master_lib, func_address)
     if lib is not None:
-        lib_hdr = read_header(lib)
-        lib_hdr.refcount -= 1
-        write_header(lib, lib_hdr)
+        hdr = read_header(lib)
+        hdr.refcount -= 1
+        write_header(lib, hdr)
 
     current = read_header(current_lib)
     current.refcount += 1
@@ -372,18 +422,17 @@ class PatchOwnStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        if membackup_offset != -1:
-            entry.membackup_offset = membackup_offset
-            entry.membackup_len = membackup_len
-        else:
+        tmp = find_first_patch(master_lib, self.target_addr)
+        if tmp is None:
             backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
             entry.membackup_len = len(backup.membackup)
+        else:
+            entry.membackup_offset = tmp.membackup_offset
+            entry.membackup_len = tmp.membackup_len
         add_log_entry(master_lib, entry, backup)
 
         #write trampoline
         trampoline = AbsoluteTrampoline()
-
-        #backup data
         inferior = gdb.selected_inferior()
         self.membackup = bytearray(inferior.read_memory(target_addr.cast(gdb.lookup_type("char").pointer()), trampoline.size()))
         trampoline.complete_address(patch_addr_arr)
@@ -438,12 +487,13 @@ class PatchLibStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        if membackup_offset != -1:
-            entry.membackup_offset = membackup_offset
-            entry.membackup_len = membackup_len
-        else:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_ptr, 8))
+        tmp = find_first_patch(master_lib, self.target_addr)
+        if tmp is None:
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.addr_got, 8))
             entry.membackup_len = len(backup.membackup)
+        else:
+            entry.membackup_offset = tmp.membackup_offset
+            entry.membackup_len = tmp.membackup_len
         add_log_entry(master_lib, entry, backup)
 
         inferior = gdb.selected_inferior()
@@ -505,28 +555,6 @@ class Patch (gdb.Command):
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
         
-    def clean(self, objfile: str) -> None:
-        rn = find_patch_section_range(".patch.backup", objfile)
-        base = rn[0]
-        inferior = gdb.selected_inferior()
-        lib_handle_arr = bytearray(inferior.read_memory(base, 8))
-        lib_handle = int.from_bytes(lib_handle_arr, "little")
-        base += len(lib_handle_arr)
-        while True:
-            index = 0
-            target_func_addr = int.from_bytes(bytearray(inferior.read_memory(base + index, 8)), "little")
-            index += 8
-            padding_size = int.from_bytes(bytearray(inferior.read_memory(base + index, 1)), "little")
-            if padding_size == 0:
-                break
-            index += padding_size
-            memcontent = bytearray(inferior.read_memory(base + index, 24 - index))
-
-            inferior.write_memory(target_func_addr, memcontent, len(memcontent))
-            base += 24
-
-        self.dlclose_addr(lib_handle)
-
     def complete(self, text, word):
         return gdb.COMPLETE_FILENAME
 
@@ -613,7 +641,8 @@ class ReapplyPatch(gdb.Command):
             entry = find_active_entry(master_lib, function_address)
             if entry is None:
                 print("Nothing to revert.")
-            membackup = read_log_entry_data(master_lib, entry).membackup
+            backup = read_log_entry_data(master_lib, entry)
+            membackup = backup.membackup
             inferior = gdb.selected_inferior()
             if membackup is None:
                 raise gdb.GdbError("Fatal error, couldn't find membackup.")
@@ -626,6 +655,11 @@ class ReapplyPatch(gdb.Command):
                 got_entry = function_address + 6 + relative_offset
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
+            #decrease refcount
+            #decrease_refcount(backup.path)
+            hdr = read_header(backup.path)
+            hdr.refcount -= 1
+            write_header(backup.path, hdr)
             i += 1
 
     def invoke(self, arg, from_tty):
