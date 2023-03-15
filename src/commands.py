@@ -261,7 +261,7 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     write_log_entry(objfile_path, log_entry, index)
 
 #TODO also sets log is_active flag
-def find_last_patch(master_lib: str, func_address: int) -> str:
+def find_last_patch_and_set_as_inactive(master_lib: str, func_address: int) -> str:
     hdr = read_header(master_lib)
     i = hdr.log_entries_count - 1
     result = None
@@ -327,8 +327,10 @@ def decrease_refcount(lib: str):
         close_lib(lib)
 
 def steal_refcount(master_lib: str, func_address: int, current_lib: str):
-    lib = find_last_patch(master_lib, func_address)
+    lib = find_last_patch_and_set_as_inactive(master_lib, func_address)
     if lib is not None:
+        #TODO use decrease_refcount instead
+        #decrease_refcount(lib)
         hdr = read_header(lib)
         hdr.refcount -= 1
         write_header(lib, hdr)
@@ -616,7 +618,7 @@ class PatchLog(gdb.Command):
 
 #WARNING!!! sets found library as inactive
 #TODO poor design
-def find_active_entry(master_lib: str, func_address: int) -> struct_log_entry:
+def find_active_entry_and_set_as_inactive(master_lib: str, func_address: int) -> struct_log_entry:
     size = read_header(master_lib).log_entries_count
     for i in range(size):
         entry = read_log_entry(master_lib, i)
@@ -638,7 +640,7 @@ class ReapplyPatch(gdb.Command):
                 function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
             except:
                 function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
-            entry = find_active_entry(master_lib, function_address)
+            entry = find_active_entry_and_set_as_inactive(master_lib, function_address)
             if entry is None:
                 print("Nothing to revert.")
             backup = read_log_entry_data(master_lib, entry)
@@ -655,7 +657,7 @@ class ReapplyPatch(gdb.Command):
                 got_entry = function_address + 6 + relative_offset
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
-            #decrease refcount
+            #TODO use commented function instead
             #decrease_refcount(backup.path)
             hdr = read_header(backup.path)
             hdr.refcount -= 1
@@ -672,7 +674,6 @@ class ReapplyPatch(gdb.Command):
 
         index = int(argv[0])
         if index == 0:
-            #TODO revert
             self.revert(argv, master_lib)
             return
 

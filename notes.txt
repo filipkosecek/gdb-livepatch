@@ -7,3 +7,5 @@
 -odstranit bug s nazvom suboru
 -opravit bug v nasobnom aplikovani patchov
 -opravit trackovanie otvorenych kniznic
+
+-implementovat zatvaranie kniznic (decrease_refcount())
