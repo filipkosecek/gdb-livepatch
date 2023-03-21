@@ -1,6 +1,6 @@
 .PHONY: clean all
 
-all: inc dec printer
+all: inc dec mult printer
 
 inc: inc.c
 	gcc -g -Wall -Werror -W -o inc inc.c
@@ -17,4 +17,5 @@ mult: mult.c
 clean:
 	rm inc
 	rm dec.so
+	rm mult.so
 	rm printer.so
