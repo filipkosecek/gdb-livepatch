@@ -1,27 +1,32 @@
 #ifndef PATCH_H
+#define PATCH_H
 
 #include <stdint.h>
 #include <string.h>
 
-#define PATCH_H
+#define PATCH_SECTION_NAME ".patch"
 
+/* size constants */
 #define PAGE_SIZE 4096
 #define HEADER_SIZE 32
 #define LOG_SIZE 2*(PAGE_SIZE)
 #define MAGIC_CONST 153823877865751
 
-#define PATCH_SECTION __attribute__((section(".patch")))
+/* variable attributes*/
+#define PATCH_SECTION __attribute__((section(PATCH_SECTION_NAME)))
 #define CONSTRUCTOR __attribute__((constructor))
 
+/* patch strategy commands */
 #define PATCH_OWN(orig, replace) "O:" #orig ":" #replace ";"
 #define PATCH_LIB(orig, replace) "L:" #orig ":" #replace ";"
 
+/* patch metadata variables */
 #define PATCH(__X) \
 PATCH_SECTION char patch_commands[] = __X; \
 \
-PATCH_SECTION char patch_header[HEADER_SIZE] __attribute__((section(".patch"))) = {0}; \
-PATCH_SECTION char patch_log[LOG_SIZE] __attribute__((section(".patch"))) = {0}; \
-PATCH_SECTION char patch_backup[PAGE_SIZE] __attribute__((section(".patch"))) = {0}; \
+PATCH_SECTION static char patch_header[HEADER_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
+PATCH_SECTION char patch_log[LOG_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
+PATCH_SECTION char patch_backup[PAGE_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
 CONSTRUCTOR void init(void); \
 \
 void init(void){ \

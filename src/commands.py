@@ -26,20 +26,14 @@ def find_object(symbol_name: str) -> gdb.Value:
     else:
         return symbol
 
-def get_libhandle(objfile_name: str) -> int:
-    try:
-        dlopen = find_object("dlopen")
-    except:
-        return 0
-    return int(dlopen(objfile_name, 6).cast(gdb.lookup_type("uint64_t")))
-
 def find_object_static(symbol_name: str, objfile_name: str) -> int:
-    libhandle = get_libhandle(objfile_name)
-    dlsym = find_object("dlsym")
-    symbol_address = int(dlsym(libhandle, symbol_name).cast(gdb.lookup_type("uint64_t")))
-    if symbol_address == 0:
-        raise gdb.GdbError("Couldn't find symbol " + symbol_name)
-    return symbol_address
+    try:
+        objfile = gdb.lookup_objfile(objfile_name)
+        symbol = int(objfile.lookup_static_symbol(symbol_name).value().address)
+    except:
+        raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
+    else:
+        return symbol
 
 class struct_header:
     def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
@@ -112,6 +106,17 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
 
+def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
+    dlsym = find_object("dlsym")
+    hdr = read_header(objfile_name)
+    if hdr is None:
+        return 0
+    libhandle = hdr.libhandle
+    symbol_address = int(dlsym(libhandle, symbol_name).cast(gdb.lookup_type("uint64_t")))
+    if symbol_address == 0:
+        raise gdb.GdbError("Couldn't find symbol " + symbol_name)
+    return symbol_address
+
 class struct_log_entry:
     def __init__(self, target_func_ptr: int,
         patch_func_ptr: int,
@@ -136,7 +141,7 @@ class struct_log_entry:
 
     def to_string(self, master_lib_path: str):
         master_lib = gdb.lookup_objfile(master_lib_path)
-        backup_ptr = find_object_static("patch_backup", master_lib_path)
+        backup_ptr = find_object_dlsym("patch_backup", master_lib_path)
         backup_ptr += self.path_offset
         path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
         tmp = " "
@@ -155,7 +160,7 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     if index*LOG_ENTRY_SIZE >= LOG_SIZE:
         return None
 
-    log_address = find_object_static("patch_log", objfile_name)
+    log_address = find_object_dlsym("patch_log", objfile_name)
     log_address += index*LOG_ENTRY_SIZE
     inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
@@ -182,7 +187,7 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
 def write_log_entry(master_lib: str, log_entry: struct_log_entry, index: int) -> None:
-    log_ptr = find_object_static("patch_log", master_lib)
+    log_ptr = find_object_dlsym("patch_log", master_lib)
     log_ptr += index*LOG_ENTRY_SIZE
 
     log_entry_buf = bytearray()
@@ -228,7 +233,7 @@ class struct_patch_backup:
 def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struct_patch_backup:
     path = None
     membackup = None
-    log_data_ptr = find_object_static("patch_backup", objfile_path)
+    log_data_ptr = find_object_dlsym("patch_backup", objfile_path)
     if log_entry.path_len != 0:
         path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
     if log_entry.membackup_len != 0:
@@ -238,7 +243,7 @@ def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struc
 def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
     header = read_header(objfile_path)
     index = header.log_entries_count
-    patch_backup_ptr = find_object_static("patch_backup", objfile_path)
+    patch_backup_ptr = find_object_dlsym("patch_backup", objfile_path)
     log_size = header.log_entries_count*LOG_ENTRY_SIZE
     backup_size = header.patch_data_array_len
     patch_backup_ptr += backup_size
@@ -292,10 +297,10 @@ def find_first_patch(master_lib: str, func_address: int) -> struct_log_entry:
     return None
 
 def copy_log(dest: str, src: str):
-    src_log = find_object_static("patch_log", src)
-    src_backup = find_object_static("patch_backup", src)
-    dest_log = find_object_static("patch_log", dest)
-    dest_backup = find_object_static("patch_backup", dest)
+    src_log = find_object_dlsym("patch_log", src)
+    src_backup = find_object_dlsym("patch_backup", src)
+    dest_log = find_object_dlsym("patch_log", dest)
+    dest_backup = find_object_dlsym("patch_backup", dest)
     src_hdr = read_header(src)
     dest_hdr = read_header(dest)
     dest_hdr.contains_log = True
@@ -411,7 +416,7 @@ class PatchOwnStrategy (PatchStrategy):
 
         #try to resolve symbol for patch function
         try:
-            patch_addr = find_object_static(self.patch_func, self.path)
+            patch_addr = find_object_dlsym(self.patch_func, self.path)
         except:
             raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = patch_addr.to_bytes(8, byteorder = "little")
@@ -459,7 +464,7 @@ class PatchLibStrategy (PatchStrategy):
             target = "'" + self.target_func + "@plt'"
             target = find_object(target)
             target_ptr = int(target.cast(gdb.lookup_type("uint64_t")))
-            patch = find_object_static(self.patch_func, self.path)
+            patch = find_object_dlsym(self.patch_func, self.path)
         except:
             self.dlclose(self.lib_handle)
 
@@ -524,7 +529,7 @@ class Patch (gdb.Command):
             #TODO
             raise gdb.GdbError("Couldn't find header.")
         commands_len = header.commands_len
-        commands = find_object_static("patch_commands", objfile)
+        commands = find_object_dlsym("patch_commands", objfile)
 
         inferior = gdb.selected_inferior()
         items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")
