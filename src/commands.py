@@ -9,6 +9,13 @@ type_list = ["char", "uint64_t", "int32_t"]
 LOG_SIZE = 2*4096
 PATCH_BACKUP_SIZE = 4096
 
+master_lib_path = ""
+
+def c_string(s: str) -> gdb.Value:
+    tmp = s + '\0'
+    buffer = bytearray(tmp.encode())
+    return gdb.Value(buffer, gdb.lookup_type("char").array(len(buffer)-1))
+
 def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
         objfile = gdb.lookup_objfile(objfile_name)
@@ -112,7 +119,7 @@ def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     if hdr is None:
         return 0
     libhandle = hdr.libhandle
-    symbol_address = int(dlsym(libhandle, symbol_name).cast(gdb.lookup_type("uint64_t")))
+    symbol_address = int(dlsym(libhandle, c_string(symbol_name)).cast(gdb.lookup_type("uint64_t")))
     if symbol_address == 0:
         raise gdb.GdbError("Couldn't find symbol " + symbol_name)
     return symbol_address
@@ -139,7 +146,8 @@ class struct_log_entry:
         self.path_len = path_len
         self.membackup_len = membackup_len
 
-    def to_string(self, master_lib_path: str):
+    def to_string(self):
+        global master_lib_path
         master_lib = gdb.lookup_objfile(master_lib_path)
         backup_ptr = find_object_dlsym("patch_backup", master_lib_path)
         backup_ptr += self.path_offset
@@ -149,18 +157,19 @@ class struct_log_entry:
             tmp = "* "
         return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
 
-def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
-    objfile = gdb.lookup_objfile(objfile_name)
+def read_log_entry(index: int) -> struct_log_entry:
+    global master_lib_path
+    objfile = gdb.lookup_objfile(master_lib_path)
     if objfile is None:
         return None
-    header = read_header(objfile_name)
+    header = read_header(master_lib_path)
     #TODO
     if header.magic != MAGIC_CONSTANT or header.contains_log == False:
         return None
     if index*LOG_ENTRY_SIZE >= LOG_SIZE:
         return None
 
-    log_address = find_object_dlsym("patch_log", objfile_name)
+    log_address = find_object_dlsym("patch_log", master_lib_path)
     log_address += index*LOG_ENTRY_SIZE
     inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
@@ -186,8 +195,9 @@ def read_log_entry(objfile_name: str, index: int) -> struct_log_entry:
     membackup_len = int.from_bytes(buffer[31:32], "little")
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
-def write_log_entry(master_lib: str, log_entry: struct_log_entry, index: int) -> None:
-    log_ptr = find_object_dlsym("patch_log", master_lib)
+def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
+    global master_lib_path
+    log_ptr = find_object_dlsym("patch_log", master_lib_path)
     log_ptr += index*LOG_ENTRY_SIZE
 
     log_entry_buf = bytearray()
@@ -213,9 +223,10 @@ def write_log_entry(master_lib: str, log_entry: struct_log_entry, index: int) ->
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
     gdb.selected_inferior().write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
-def get_last_log_entry(master_lib: str) -> struct_log_entry:
-    hdr = read_header(master_lib)
-    return read_log_entry(master_lib, hdr.log_entries_count - 1)
+def get_last_log_entry() -> struct_log_entry:
+    global master_lib_path
+    hdr = read_header(master_lib_path)
+    return read_log_entry(hdr.log_entries_count - 1)
 
 class struct_patch_backup:
     def __init__(self, path: str, membackup: bytearray):
@@ -230,20 +241,22 @@ class struct_patch_backup:
             result += len(self.membackup)
         return result
 
-def read_log_entry_data(objfile_path: str, log_entry: struct_log_entry) -> struct_patch_backup:
+def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
+    global master_lib_path
     path = None
     membackup = None
-    log_data_ptr = find_object_dlsym("patch_backup", objfile_path)
+    log_data_ptr = find_object_dlsym("patch_backup", master_lib_path)
     if log_entry.path_len != 0:
         path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
     if log_entry.membackup_len != 0:
         membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
     return struct_patch_backup(path, membackup)
 
-def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
-    header = read_header(objfile_path)
+def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
+    global master_lib_path
+    header = read_header(master_lib_path)
     index = header.log_entries_count
-    patch_backup_ptr = find_object_dlsym("patch_backup", objfile_path)
+    patch_backup_ptr = find_object_dlsym("patch_backup", master_lib_path)
     log_size = header.log_entries_count*LOG_ENTRY_SIZE
     backup_size = header.patch_data_array_len
     patch_backup_ptr += backup_size
@@ -254,7 +267,7 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
     #update header
     header.log_entries_count += 1
     header.patch_data_array_len += patch_backup.size()
-    write_header(objfile_path, header)
+    write_header(master_lib_path, header)
 
     inferior = gdb.selected_inferior()
     if patch_backup.path is not None:
@@ -268,28 +281,30 @@ def add_log_entry(objfile_path: str, log_entry: struct_log_entry, patch_backup: 
         inferior.write_memory(patch_backup_ptr, patch_backup.membackup, len(patch_backup.membackup))
         log_entry.membackup_offset = backup_size
 
-    write_log_entry(objfile_path, log_entry, index)
+    write_log_entry(log_entry, index)
 
 #TODO also sets log is_active flag
-def find_last_patch_and_set_as_inactive(master_lib: str, func_address: int) -> str:
-    hdr = read_header(master_lib)
+def find_last_patch_and_set_as_inactive(func_address: int) -> str:
+    global master_lib_path
+    hdr = read_header(master_lib_path)
     i = hdr.log_entries_count - 1
     result = None
     while i >= 0:
-        entry = read_log_entry(master_lib, i)
+        entry = read_log_entry(i)
         if entry is None:
             return None
         if entry.is_active and entry.target_func_ptr == func_address:
-            result = read_log_entry_data(master_lib, entry).path
+            result = read_log_entry_data(entry).path
             entry.is_active = False
-            write_log_entry(master_lib, entry, i)
+            write_log_entry(entry, i)
         i -= 1
     return result
 
-def find_first_patch(master_lib: str, func_address: int) -> struct_log_entry:
-    hdr = read_header(master_lib)
+def find_first_patch(func_address: int) -> struct_log_entry:
+    global master_lib_path
+    hdr = read_header(master_lib_path)
     for i in range(hdr.log_entries_count):
-        entry = read_log_entry(master_lib, i)
+        entry = read_log_entry(i)
         if entry is None:
             return None
         if entry.target_func_ptr == func_address:
@@ -297,24 +312,31 @@ def find_first_patch(master_lib: str, func_address: int) -> struct_log_entry:
     return None
 
 def copy_log(dest: str, src: str):
+    global master_lib_path
     src_log = find_object_dlsym("patch_log", src)
     src_backup = find_object_dlsym("patch_backup", src)
     dest_log = find_object_dlsym("patch_log", dest)
     dest_backup = find_object_dlsym("patch_backup", dest)
     src_hdr = read_header(src)
+    src_hdr.contains_log = False
+    write_header(src, src_hdr)
     dest_hdr = read_header(dest)
     dest_hdr.contains_log = True
     dest_hdr.log_entries_count = src_hdr.log_entries_count
     dest_hdr.patch_data_array_len = src_hdr.patch_data_array_len
+    write_header(dest, dest_hdr)
     inferior = gdb.selected_inferior()
     log_buffer = bytearray(inferior.read_memory(src_log, src_hdr.log_entries_count*LOG_ENTRY_SIZE))
     backup_buffer = bytearray(inferior.read_memory(src_backup, src_hdr.patch_data_array_len))
     inferior.write_memory(dest_log, log_buffer, len(log_buffer))
     inferior.write_memory(dest_backup, backup_buffer, len(backup_buffer))
+    master_lib_path = dest
 
 def close_lib(lib: str):
+    global master_lib_path
     hdr = read_header(lib)
     if hdr.contains_log:
+        master_lib_path = ""
         hdr.contains_log = False
         write_header(lib, hdr)
         for objfile in gdb.objfiles():
@@ -325,7 +347,8 @@ def close_lib(lib: str):
             if header is None:
                 continue
             if header.magic == MAGIC_CONSTANT:
-               copy_log(objfile.filename, lib)
+                copy_log(objfile.filename, lib)
+
     dlclose = find_object("dlclose")
     dlclose(hdr.libhandle)
 
@@ -336,20 +359,20 @@ def decrease_refcount(lib: str):
     if hdr.refcount <= 0:
         close_lib(lib)
 
-def steal_refcount(master_lib: str, func_address: int, current_lib: str):
-    lib = find_last_patch_and_set_as_inactive(master_lib, func_address)
+def steal_refcount(func_address: int, current_lib: str):
+    lib = find_last_patch_and_set_as_inactive(func_address)
     if lib is not None:
+        pass
         #TODO use decrease_refcount instead
-        #decrease_refcount(lib)
-        hdr = read_header(lib)
-        hdr.refcount -= 1
-        write_header(lib, hdr)
+        decrease_refcount(lib)
 
     current = read_header(current_lib)
     current.refcount += 1
     write_header(current_lib, current)
 
-def find_master_lib() -> str:
+def find_master_lib() -> None:
+    global master_lib_path
+    master_lib_path = ""
     for objfile in gdb.objfiles():
         try:
             header = read_header(objfile.filename)
@@ -358,8 +381,7 @@ def find_master_lib() -> str:
         if header is None:
             continue
         if header.contains_log:
-            return objfile.filename
-    return None
+            master_lib_path = objfile.filename
 
 class AbsoluteTrampoline:
     def __init__(self):
@@ -388,7 +410,7 @@ class PatchStrategy:
         self.target_func = target_func
         self.patch_func = patch_func
 
-    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         pass
     
     def clean(self):
@@ -398,7 +420,7 @@ class PatchOwnStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
-    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         try:
             target_addr = find_object(self.target_func)
             self.target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
@@ -422,7 +444,7 @@ class PatchOwnStrategy (PatchStrategy):
         patch_addr_arr = patch_addr.to_bytes(8, byteorder = "little")
 
         #steal refcount
-        steal_refcount(master_lib, self.target_addr, self.path)
+        steal_refcount(self.target_addr, self.path)
 
         #write to log
         entry = struct_log_entry(self.target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
@@ -434,14 +456,14 @@ class PatchOwnStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        tmp = find_first_patch(master_lib, self.target_addr)
+        tmp = find_first_patch(self.target_addr)
         if tmp is None:
             backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
-        add_log_entry(master_lib, entry, backup)
+        add_log_entry(entry, backup)
 
         #write trampoline
         trampoline = AbsoluteTrampoline()
@@ -458,7 +480,7 @@ class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
-    def do_patch(self, master_lib: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         #find target and patch functions
         try:
             target = "'" + self.target_func + "@plt'"
@@ -485,7 +507,7 @@ class PatchLibStrategy (PatchStrategy):
         patch_arr = patch.to_bytes(8, byteorder = "little")
 
         #steal refcount
-        steal_refcount(master_lib, target_ptr, self.path)
+        steal_refcount(target_ptr, self.path)
 
         #write to log
         entry = struct_log_entry(self.target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
@@ -497,14 +519,14 @@ class PatchLibStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        tmp = find_first_patch(master_lib, self.target_addr)
+        tmp = find_first_patch(self.target_addr)
         if tmp is None:
             backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.addr_got, 8))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
-        add_log_entry(master_lib, entry, backup)
+        add_log_entry(entry, backup)
 
         inferior = gdb.selected_inferior()
         #backup data
@@ -551,12 +573,11 @@ class Patch (gdb.Command):
  
     #TODO check -> magic const must be equal to the one defined in C header
     def load_patch_lib(self, path: str):
-        self.dlopen_ret = self.dlopen_addr(path, 2)
+        self.dlopen_ret = self.dlopen_addr(c_string(path), 2)
         if self.dlopen_ret == 0:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None or header.magic != MAGIC_CONSTANT:
-            self.dlclose_addr(self.dlopen_ret)
             raise gdb.GdbError("`Object file " + path + " has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
@@ -565,6 +586,7 @@ class Patch (gdb.Command):
         return gdb.COMPLETE_FILENAME
 
     def invoke(self, arg, from_tty):
+        global master_lib_path
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
         if len(argv) != 1:
@@ -574,15 +596,15 @@ class Patch (gdb.Command):
         self.dlopen_addr = find_object("dlopen")
         self.dlclose_addr = find_object("dlclose")
         self.is_patchable()
+        find_master_lib()
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
-        master_lib = find_master_lib()
-        if master_lib is None:
-            master_lib = argv[0]
-        tmp = read_header(master_lib)
+        if not master_lib_path:
+            master_lib_path = argv[0]
+        tmp = read_header(master_lib_path)
         tmp.contains_log = True
-        write_header(master_lib, tmp)
+        write_header(master_lib_path, tmp)
         counter = 0
 
         for patch in metadata:
@@ -597,10 +619,10 @@ class Patch (gdb.Command):
                 raise gdb.GdbError("Patching own and library functions is only supported for now.")
 
             if counter == 0:
-                self.strategy.do_patch(master_lib, -1, 0, -1, 0)
-                first_entry = get_last_log_entry(master_lib)
+                self.strategy.do_patch(-1, 0, -1, 0)
+                first_entry = get_last_log_entry()
             else:
-                self.strategy.do_patch(master_lib, first_entry.path_offset, first_entry.path_len, -1, 0)
+                self.strategy.do_patch(first_entry.path_offset, first_entry.path_len, -1, 0)
             counter += 1
 
 class PatchLog(gdb.Command):
@@ -608,28 +630,33 @@ class PatchLog(gdb.Command):
         super(PatchLog, self).__init__("patch-log", gdb.COMMAND_USER)
 
     def invoke(self, arg, from_tty):
+        global master_lib_path
         argv = gdb.string_to_argv(arg)
         if len(argv) != 0:
             raise gdb.GdbError("patch-log takes no parameters")
 
         print("[0] revert")
 
-        master_lib_path = find_master_lib()
+        find_master_lib()
+        if not master_lib_path:
+            print("Cannot find the log. No patch applied.")
+            return
         header = read_header(master_lib_path)
         for i in range(header.log_entries_count):
-            entry = read_log_entry(master_lib_path, i)
-            print("[" + str(i+1) + "]" + entry.to_string(master_lib_path))
+            entry = read_log_entry(i)
+            print("[" + str(i+1) + "]" + entry.to_string())
 
 #WARNING!!! sets found library as inactive
 #TODO poor design
-def find_active_entry_and_set_as_inactive(master_lib: str, func_address: int) -> struct_log_entry:
-    size = read_header(master_lib).log_entries_count
+def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
+    global master_lib_path
+    size = read_header(master_lib_path).log_entries_count
     for i in range(size):
-        entry = read_log_entry(master_lib, i)
+        entry = read_log_entry(i)
         #TODO when applying a patch you must scan if a function has been patched to assign the corresponding memory backup
         if entry.target_func_ptr == func_address and entry.is_active:
             entry.is_active = False
-            write_log_entry(master_lib, entry, i)
+            write_log_entry(entry, i)
             return entry
     return None
 
@@ -637,17 +664,17 @@ class ReapplyPatch(gdb.Command):
     def __init__(self):
         super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
 
-    def revert(self, argv: list[str], master_lib: str):
+    def revert(self, argv: list[str]):
         i = 1
         while i < len(argv):
             try:
                 function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
             except:
                 function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
-            entry = find_active_entry_and_set_as_inactive(master_lib, function_address)
+            entry = find_active_entry_and_set_as_inactive(function_address)
             if entry is None:
                 print("Nothing to revert.")
-            backup = read_log_entry_data(master_lib, entry)
+            backup = read_log_entry_data(entry)
             membackup = backup.membackup
             inferior = gdb.selected_inferior()
             if membackup is None:
@@ -662,28 +689,26 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
             #TODO use commented function instead
-            #decrease_refcount(backup.path)
-            hdr = read_header(backup.path)
-            hdr.refcount -= 1
-            write_header(backup.path, hdr)
+            decrease_refcount(backup.path)
             i += 1
 
     def invoke(self, arg, from_tty):
+        global master_lib_path
         argv = gdb.string_to_argv(arg)
         if len(arg) < 1:
            raise gdb.GdbError("patch-reapply takes one parameter")
-        master_lib = find_master_lib()
-        if master_lib is None:
+        find_master_lib()
+        if not master_lib_path:
             raise gdb.GdbError("Couldn't find the log, master library is not present.")
 
         index = int(argv[0])
         if index == 0:
-            self.revert(argv, master_lib)
+            self.revert(argv)
             return
 
         index -= 1
 
-        log_entry = read_log_entry(master_lib, index)
+        log_entry = read_log_entry(index)
         if log_entry is None:
             raise gdb.GdbError("The log entry does not exist.")
 
@@ -692,7 +717,7 @@ class ReapplyPatch(gdb.Command):
             return
 
         #check if the library is still open
-        data = read_log_entry_data(master_lib, log_entry)
+        data = read_log_entry_data(log_entry)
         if data.path is None:
             gdb.GdbError("Failed to fetch patchlib path.")
         if gdb.lookup_objfile(data.path) is None:
@@ -710,9 +735,9 @@ class ReapplyPatch(gdb.Command):
             got_entry = instruction_ptr + relative_offset
             inferior.write(log_entry.patch_func_ptr.to_bytes(8, "little"))
 
-        steal_refcount(master_lib, log_entry.target_func_ptr, data.path)
+        steal_refcount(log_entry.target_func_ptr, data.path)
         log_entry.is_active = True
-        write_log_entry(master_lib, log_entry, index)
+        write_log_entry(log_entry, index)
 
 Patch()
 PatchLog()
