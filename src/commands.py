@@ -720,9 +720,11 @@ class ReapplyPatch(gdb.Command):
         data = read_log_entry_data(log_entry)
         if data.path is None:
             gdb.GdbError("Failed to fetch patchlib path.")
-        if gdb.lookup_objfile(data.path) is None:
+        try:
+            gdb.lookup_objfile(data.path)
+        except:
             #the lib is unmapped
-            raise gdb.GdbError("The library has been closed. Cannot apply the patch.")
+            raise gdb.GdbError("The library has been closed. Cannot apply the patch. To apply the patch, use patch command.")
         if log_entry.patch_type == "O":
             trampoline = AbsoluteTrampoline()
             trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
