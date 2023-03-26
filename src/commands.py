@@ -157,22 +157,7 @@ class struct_log_entry:
             tmp = "* "
         return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
 
-def read_log_entry(index: int) -> struct_log_entry:
-    global master_lib_path
-    objfile = gdb.lookup_objfile(master_lib_path)
-    if objfile is None:
-        return None
-    header = read_header(master_lib_path)
-    #TODO
-    if header.magic != MAGIC_CONSTANT or header.contains_log == False:
-        return None
-    if index*LOG_ENTRY_SIZE >= LOG_SIZE:
-        return None
-
-    log_address = find_object_dlsym("patch_log", master_lib_path)
-    log_address += index*LOG_ENTRY_SIZE
-    inferior = gdb.selected_inferior()
-    buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
+def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
     target_func_ptr = int.from_bytes(buffer[0:8], "little")
     patch_func_ptr = int.from_bytes(buffer[8:16], "little")
     patch_type = int.from_bytes(buffer[16:17], "little")
@@ -195,11 +180,25 @@ def read_log_entry(index: int) -> struct_log_entry:
     membackup_len = int.from_bytes(buffer[31:32], "little")
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
-def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
+def read_log_entry(index: int) -> struct_log_entry:
     global master_lib_path
-    log_ptr = find_object_dlsym("patch_log", master_lib_path)
-    log_ptr += index*LOG_ENTRY_SIZE
+    objfile = gdb.lookup_objfile(master_lib_path)
+    if objfile is None:
+        return None
+    header = read_header(master_lib_path)
+    #TODO
+    if header.magic != MAGIC_CONSTANT or header.contains_log == False:
+        return None
+    if index*LOG_ENTRY_SIZE >= LOG_SIZE:
+        return None
 
+    log_address = find_object_dlsym("patch_log", master_lib_path)
+    log_address += index*LOG_ENTRY_SIZE
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
+    return bytearray_to_log_entry(buffer)
+
+def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
     log_entry_buf = bytearray()
     log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, "little"))
     log_entry_buf.extend(log_entry.patch_func_ptr.to_bytes(8, "little"))
@@ -221,6 +220,14 @@ def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     log_entry_buf.extend(log_entry.membackup_offset.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
+    return log_entry_buf
+
+def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
+    global master_lib_path
+    log_ptr = find_object_dlsym("patch_log", master_lib_path)
+    log_ptr += index*LOG_ENTRY_SIZE
+
+    log_entry_buf = log_entry_to_bytearray(log_entry)
     gdb.selected_inferior().write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
 def get_last_log_entry() -> struct_log_entry:
@@ -714,7 +721,7 @@ class ReapplyPatch(gdb.Command):
 
         #nothing to do
         if log_entry.is_active:
-            return
+            raise gdb.GdbError("The patch is active. No work to do.")
 
         #check if the library is still open
         data = read_log_entry_data(log_entry)

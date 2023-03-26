@@ -12,7 +12,8 @@
 https://stackoverflow.com/questions/70177811/how-do-i-use-the-second-value-constructor-in-gdbs-python-api
 
 hlavny todo list:
-	-v pripade stripnutej binarky vypytat adresu
+	-v pripade stripnutej binarky vypytat adresu (rovnako aj pri revertovani patchu)
+		-upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
 	-umoznit oznacit funkcie ktorych patch sa vykona/nevykona
 	-ak pri revertovani nie je zadane meno/mena funkcie odstrania sa vsetky patche
 	-pridat prikaz pre vypisanie aktivnych kniznic a ich funkcii
