@@ -671,7 +671,34 @@ class ReapplyPatch(gdb.Command):
     def __init__(self):
         super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
 
+    def revert_all(self):
+        header = read_header(master_lib_path)
+        patch_log = find_object_dlsym("patch_log", master_lib_path)
+        inferior = gdb.selected_inferior()
+        buffer = bytearray(gdb.selected_inferior().read_memory(patch_log, header.log_entries_count*LOG_ENTRY_SIZE))
+        for i in range(header.log_entries_count):
+            entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+            if not entry.is_active:
+                continue
+            backup = read_log_entry_data(entry)
+            if backup.path is None or backup.membackup is None:
+                raise gdb.GdbError("Cannot find memory backup or path.")
+            if entry.patch_type == "O":
+                #TODO only absolute trampoline for now
+                inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
+            elif entry.patch_type == "L":
+                instruction = target_func_ptr + 2
+                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little")
+                got_entry = target_func_ptr + 6 + relative_offset
+                inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
+
+            decrease_refcount(backup.path)
+           
+
     def revert(self, argv: list[str]):
+        if len(argv) == 1:
+            self.revert_all()
+            return
         i = 1
         while i < len(argv):
             try:
@@ -680,11 +707,12 @@ class ReapplyPatch(gdb.Command):
                 function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
             entry = find_active_entry_and_set_as_inactive(function_address)
             if entry is None:
-                print("Nothing to revert.")
+                gdb.write("Nothing to revert.")
+                return
             backup = read_log_entry_data(entry)
             membackup = backup.membackup
             inferior = gdb.selected_inferior()
-            if membackup is None:
+            if path is None or membackup is None:
                 raise gdb.GdbError("Fatal error, couldn't find membackup.")
             if entry.patch_type == "O":
                 #TODO only absolute trampoline for now
@@ -695,7 +723,6 @@ class ReapplyPatch(gdb.Command):
                 got_entry = function_address + 6 + relative_offset
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
-            #TODO use commented function instead
             decrease_refcount(backup.path)
             i += 1
 
