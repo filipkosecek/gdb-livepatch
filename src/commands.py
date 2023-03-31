@@ -732,6 +732,7 @@ class ReapplyPatch(gdb.Command):
                 gdb.write("Nothing to revert.")
                 return
             backup = read_log_entry_data(entry)
+            path = backup.path
             membackup = backup.membackup
             inferior = gdb.selected_inferior()
             if path is None or membackup is None:
