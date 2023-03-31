@@ -1,5 +1,6 @@
 import gdb
 import time
+import re
 from datetime import datetime
 
 MAGIC_CONSTANT = 153823877865751
@@ -41,6 +42,13 @@ def find_object_static(symbol_name: str, objfile_name: str) -> int:
         raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
     else:
         return symbol
+
+def addr_to_symbol(address: int) -> str:
+    cmd = gdb.execute("info symbol " + str(address), to_string=True)
+    match = re.match("No symbol matches .*\.", cmd)
+    if match:
+        return None
+    return cmd.split(' ')[0]
 
 class struct_header:
     def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
@@ -152,10 +160,19 @@ class struct_log_entry:
         backup_ptr = find_object_dlsym("patch_backup", master_lib_path)
         backup_ptr += self.path_offset
         path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
+
+        target_func_str = addr_to_symbol(self.target_func_ptr)
+        patch_func_str = addr_to_symbol(self.patch_func_ptr)
+
+        if target_func_str is None:
+            target_func_str = hex(self.target_func_ptr)
+        if patch_func_str is None:
+            patch_func_str = hex(self.patch_func_ptr)
+
         tmp = " "
         if self.is_active:
             tmp = "* "
-        return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", hex(self.target_func_ptr), " -> ", path, ":", hex(self.patch_func_ptr)])
+        return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", patch_func_str])
 
 def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
     target_func_ptr = int.from_bytes(buffer[0:8], "little")
@@ -295,11 +312,11 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
     global master_lib_path
     hdr = read_header(master_lib_path)
     i = hdr.log_entries_count - 1
+    log_ptr = find_object_dlsym("patch_log", master_lib_path)
+    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
     result = None
     while i >= 0:
-        entry = read_log_entry(i)
-        if entry is None:
-            return None
+        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(entry).path
             entry.is_active = False
@@ -310,10 +327,10 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
 def find_first_patch(func_address: int) -> struct_log_entry:
     global master_lib_path
     hdr = read_header(master_lib_path)
+    log_ptr = find_object_dlsym("patch_log", master_lib_path)
+    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
     for i in range(hdr.log_entries_count):
-        entry = read_log_entry(i)
-        if entry is None:
-            return None
+        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         if entry.target_func_ptr == func_address:
             return entry
     return None
@@ -649,8 +666,10 @@ class PatchLog(gdb.Command):
             print("Cannot find the log. No patch applied.")
             return
         header = read_header(master_lib_path)
+        log_ptr = find_object_dlsym("patch_log", master_lib_path)
+        buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, header.log_entries_count*LOG_ENTRY_SIZE))
         for i in range(header.log_entries_count):
-            entry = read_log_entry(i)
+            entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
             print("[" + str(i+1) + "]" + entry.to_string())
 
 #WARNING!!! sets found library as inactive
@@ -658,8 +677,11 @@ class PatchLog(gdb.Command):
 def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
     global master_lib_path
     size = read_header(master_lib_path).log_entries_count
+    log_ptr = find_object_dlsym("patch_log", master_lib_path)
+    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, size*LOG_ENTRY_SIZE))
+    result = None
     for i in range(size):
-        entry = read_log_entry(i)
+        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         #TODO when applying a patch you must scan if a function has been patched to assign the corresponding memory backup
         if entry.target_func_ptr == func_address and entry.is_active:
             entry.is_active = False
