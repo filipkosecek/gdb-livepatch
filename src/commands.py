@@ -540,7 +540,7 @@ class PatchLibStrategy (PatchStrategy):
         steal_refcount(target_ptr, self.path)
 
         #write to log
-        entry = struct_log_entry(self.target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
+        entry = struct_log_entry(target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
         backup = struct_patch_backup(None, None)
         if path_offset != -1:
             entry.path_offset = path_offset
@@ -549,7 +549,7 @@ class PatchLibStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        tmp = find_first_patch(self.target_addr)
+        tmp = find_first_patch(target_ptr)
         if tmp is None:
             backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.addr_got, 8))
             entry.membackup_len = len(backup.membackup)
@@ -721,13 +721,12 @@ class ReapplyPatch(gdb.Command):
                 #TODO only absolute trampoline for now
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
             elif entry.patch_type == "L":
-                instruction = target_func_ptr + 2
+                instruction = entry.target_func_ptr + 2
                 relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little")
-                got_entry = target_func_ptr + 6 + relative_offset
+                got_entry = entry.target_func_ptr + 6 + relative_offset
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
             decrease_refcount(backup.path)
-           
 
     def revert(self, argv: list[str]):
         if len(argv) == 1:
@@ -735,14 +734,14 @@ class ReapplyPatch(gdb.Command):
             return
         i = 1
         while i < len(argv):
-            try:
-                function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
-            except:
-                function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+            function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
             entry = find_active_entry_and_set_as_inactive(function_address)
             if entry is None:
-                gdb.write("Nothing to revert.")
-                return
+                #try to find library function
+                function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+                entry = find_active_entry_and_set_as_inactive(function_address)
+                if entry is None:
+                    raise gdb.GdbError("Nothing to revert.")
             backup = read_log_entry_data(entry)
             path = backup.path
             membackup = backup.membackup
