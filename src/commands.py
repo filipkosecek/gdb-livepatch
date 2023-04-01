@@ -12,6 +12,12 @@ PATCH_BACKUP_SIZE = 4096
 
 master_lib_path = ""
 
+def is_attached() -> bool:
+    inferior = gdb.selected_inferior()
+    if inferior.was_attached:
+        return True
+    return False
+
 def c_string(s: str) -> gdb.Value:
     tmp = s + '\0'
     buffer = bytearray(tmp.encode())
@@ -616,6 +622,9 @@ class Patch (gdb.Command):
         if len(argv) != 1:
             raise gdb.GdbError("patch takes one parameter")
 
+        if not is_attached():
+            raise gdb.GdbError("No process attached.")
+
         #find necessary objects
         self.dlopen_addr = find_object("dlopen")
         self.dlclose_addr = find_object("dlclose")
@@ -658,6 +667,9 @@ class PatchLog(gdb.Command):
         argv = gdb.string_to_argv(arg)
         if len(argv) != 0:
             raise gdb.GdbError("patch-log takes no parameters")
+
+        if not is_attached():
+            raise gdb.GdbError("No process attached.")
 
         print("[0] revert")
 
@@ -754,6 +766,8 @@ class ReapplyPatch(gdb.Command):
         argv = gdb.string_to_argv(arg)
         if len(arg) < 1:
            raise gdb.GdbError("patch-reapply takes one parameter")
+        if not is_attached():
+            raise gdb.GdbError("No process attached.")
         find_master_lib()
         if not master_lib_path:
             raise gdb.GdbError("Couldn't find the log, master library is not present.")
