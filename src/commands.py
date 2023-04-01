@@ -10,6 +10,9 @@ type_list = ["char", "uint64_t", "int32_t"]
 LOG_SIZE = 2*4096
 PATCH_BACKUP_SIZE = 4096
 
+HEX_REGEX = "0x[0-9]+"
+DECIMAL_REGEX = "[0-9]+"
+
 master_lib_path = ""
 
 def is_attached() -> bool:
@@ -734,7 +737,12 @@ class ReapplyPatch(gdb.Command):
             return
         i = 1
         while i < len(argv):
-            function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
+            if re.match(HEX_REGEX, argv[i]):
+                function_address = int(argv[i], 16)
+            elif re.match(DECIMAL_REGEX, argv[i]):
+                function_address = int(argv[i], 10)
+            else:
+                function_address = int(find_object(argv[i]).cast(gdb.lookup_type("uint64_t")))
             entry = find_active_entry_and_set_as_inactive(function_address)
             if entry is None:
                 #try to find library function
