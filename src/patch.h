@@ -10,7 +10,7 @@
 #define PAGE_SIZE 4096
 #define HEADER_SIZE 32
 #define LOG_SIZE 2*(PAGE_SIZE)
-#define MAGIC_CONST 153823877865751
+#define MAGIC_CONST 1024
 
 /* variable attributes*/
 #define PATCH_SECTION __attribute__((section(PATCH_SECTION_NAME)))
@@ -30,8 +30,7 @@ PATCH_SECTION char patch_backup[PAGE_SIZE] __attribute__((section(PATCH_SECTION_
 CONSTRUCTOR void init(void); \
 \
 void init(void){ \
-	uint64_t magic_constant = MAGIC_CONST; \
-	uint32_t commands_len; \
+	uint32_t commands_len, magic_constant = MAGIC_CONST; \
 \
 	memcpy(patch_header, &magic_constant, sizeof(magic_constant)); \
 	commands_len = (uint32_t) strlen(patch_commands); \

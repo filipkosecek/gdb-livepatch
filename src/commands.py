@@ -3,20 +3,29 @@ import time
 import re
 from datetime import datetime
 
-MAGIC_CONSTANT = 153823877865751
+BYTE_ORDER = "little"
+
+PAGE_SIZE = 4096
+MAGIC_CONSTANT = 1024
 HEADER_SIZE = 32
 LOG_ENTRY_SIZE = 32
 type_list = ["char", "uint64_t", "int32_t"]
 LOG_SIZE = 2*4096
-PATCH_BACKUP_SIZE = 4096
+PATCH_BACKUP_SIZE = PAGE_SIZE
 
 PATCH_HEADER_VAR_NAME = "patch_header"
 PATCH_LOG_VAR_NAME = "patch_log"
 PATCH_LOG_DATA_VAR_NAME = "patch_backup"
 PATCH_COMMANDS_VAR_NAME = "patch_commands"
 
-HEX_REGEX = "0x[0-9]+"
+HEX_REGEX = "0x[1-9a-f][0-9a-f]*"
 DECIMAL_REGEX = "[1-9][0-9]*"
+
+TRAMPOLINE_BITMAP_SIZE = 32
+TRAMPOLINE_ARRAY_SIZE = 254
+ABSOLUTE_TRAMPOLINE_SIZE = 13
+PADDED_TRAMPOLINE_SIZE = 16
+SHORT_TRAMPOLINE_SIZE = 5
 
 master_lib_path = ""
 
@@ -65,9 +74,10 @@ def addr_to_symbol(address: int) -> str:
     return cmd.split(' ')[0]
 
 class struct_header:
-    def __init__(self, magic: int, libhandle: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
+    def __init__(self, magic: int, libhandle: int, trampoline_page_ptr: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
         self.magic = magic
         self.libhandle = libhandle
+        self.trampoline_page_ptr = trampoline_page_ptr
         self.refcount = refcount
         self.contains_log = contains_log
         #log entries count
@@ -79,6 +89,7 @@ class struct_header:
     def print(self):
         print(self.magic)
         print(self.libhandle)
+        print(self.trampoline_page_ptr)
         print(self.refcount)
         print(self.contains_log)
         print(self.log_entries_count)
@@ -96,22 +107,23 @@ def read_header(objfile_path: str) -> struct_header:
     except:
         return None
     buffer = inferior.read_memory(header_addr, HEADER_SIZE)
-    magic = int.from_bytes(buffer[:8], "little")
+    magic = int.from_bytes(buffer[:4], "little")
     if magic != MAGIC_CONSTANT:
         return None
-    libhandle = int.from_bytes(buffer[8:16], "little")
-    refcount = int.from_bytes(buffer[16:18], "little")
-    contains_log = int.from_bytes(buffer[18:20], "little")
+    libhandle = int.from_bytes(buffer[4:12], "little")
+    trampoline_page_ptr = int.from_bytes(buffer[12:20], "little")
+    refcount = int.from_bytes(buffer[20:22], "little")
+    contains_log = int.from_bytes(buffer[22:24], "little")
     if contains_log == 0:
         contains_log_bool = False
     elif contains_log == 1:
         contains_log_bool = True
     else:
         raise gdb.GdbError("Got wrong value for contains_log value.")
-    log_entries_count = int.from_bytes(buffer[20:24], "little")
-    patch_data_array_len = int.from_bytes(buffer[24:28], "little")
+    log_entries_count = int.from_bytes(buffer[24:26], "little")
+    patch_data_array_len = int.from_bytes(buffer[26:28], "little")
     commands_len = int.from_bytes(buffer[28:32], "little")
-    return struct_header(magic, libhandle, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
+    return struct_header(magic, libhandle, trampoline_page_ptr, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
 
 def write_header(objfile_path: str, header: struct_header) -> None:
     if header.magic != MAGIC_CONSTANT:
@@ -120,20 +132,180 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     header_addr = find_object_static(PATCH_HEADER_VAR_NAME, objfile_path)
 
     buffer = bytearray()
-    buffer.extend(header.magic.to_bytes(8, "little"))
+    buffer.extend(header.magic.to_bytes(4, "little"))
     buffer.extend(header.libhandle.to_bytes(8, "little"))
+    buffer.extend(header.trampoline_page_ptr.to_bytes(8, "little"))
     buffer.extend(header.refcount.to_bytes(2, "little"))
     if header.contains_log:
         tmp = 1
     else:
         tmp = 0
     buffer.extend(tmp.to_bytes(2, "little"))
-    buffer.extend(header.log_entries_count.to_bytes(4, "little"))
-    buffer.extend(header.patch_data_array_len.to_bytes(4, "little"))
+    buffer.extend(header.log_entries_count.to_bytes(2, "little"))
+    buffer.extend(header.patch_data_array_len.to_bytes(2, "little"))
     buffer.extend(header.commands_len.to_bytes(4, "little"))
 
     inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
+
+def find_mappings() -> set[int]:
+    mappings = gdb.execute("info proc mappings", to_string=True)
+    mappings_list = re.findall("^ *" + HEX_REGEX, mappings, re.MULTILINE)
+    result = set()
+    for page in mappings_list:
+        result.add(int(page, 16))
+    return result
+
+#TODO add check if page is not too far
+def find_nearest_free_page(address: int) -> int:
+    current = address & 0xfffffffffffff000
+    allocated_pages = find_mappings()
+    #check left
+    tmp = current - PAGE_SIZE
+    while tmp > 0:
+        if tmp not in allocated_pages:
+            return tmp
+        tmp -= PAGE_SIZE
+    #check right
+    tmp = current + PAGE_SIZE
+    while tmp < 0x7fffffffffff:
+        if tmp not in allocated_pages:
+            return tmp
+        tmp += PAGE_SIZE
+    return 0
+
+def init_trampoline_bitmap(address: int):
+    inferior = gdb.selected_inferior()
+    inferior.write_memory(address, bytearray(TRAMPOLINE_BITMAP_SIZE), TRAMPOLINE_BITMAP_SIZE)
+
+def save_registers() -> dict[str, int]:
+    result = dict()
+    result["rax"] = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
+    result["rbx"] = int(gdb.parse_and_eval("$rbx").cast(gdb.lookup_type("uint64_t")))
+    result["rcx"] = int(gdb.parse_and_eval("$rcx").cast(gdb.lookup_type("uint64_t")))
+    result["rdx"] = int(gdb.parse_and_eval("$rdx").cast(gdb.lookup_type("uint64_t")))
+    result["rsi"] = int(gdb.parse_and_eval("$rsi").cast(gdb.lookup_type("uint64_t")))
+    result["rdi"] = int(gdb.parse_and_eval("$rdi").cast(gdb.lookup_type("uint64_t")))
+    result["rbp"] = int(gdb.parse_and_eval("$rbp").cast(gdb.lookup_type("uint64_t")))
+    result["rsp"] = int(gdb.parse_and_eval("$rsp").cast(gdb.lookup_type("uint64_t")))
+    result["r8"] = int(gdb.parse_and_eval("$r8").cast(gdb.lookup_type("uint64_t")))
+    result["r9"] = int(gdb.parse_and_eval("$r9").cast(gdb.lookup_type("uint64_t")))
+    result["r10"] = int(gdb.parse_and_eval("$r10").cast(gdb.lookup_type("uint64_t")))
+    result["r11"] = int(gdb.parse_and_eval("$r11").cast(gdb.lookup_type("uint64_t")))
+    result["r12"] = int(gdb.parse_and_eval("$r12").cast(gdb.lookup_type("uint64_t")))
+    result["r13"] = int(gdb.parse_and_eval("$r13").cast(gdb.lookup_type("uint64_t")))
+    result["r14"] = int(gdb.parse_and_eval("$r14").cast(gdb.lookup_type("uint64_t")))
+    result["r15"] = int(gdb.parse_and_eval("$r15").cast(gdb.lookup_type("uint64_t")))
+    return result
+
+def restore_registers(registers: dict[str, int]):
+    for reg in registers:
+        gdb.execute("set $" + reg + "=" + str(registers[reg]))
+
+def exec_mmap(address: int, prot: int, flags: int) -> int:
+    inferior = gdb.selected_inferior()
+    rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
+    registers = save_registers()
+    syscall_instruction = bytearray.fromhex("0f 05")
+    membackup = bytearray(inferior.read_memory(rip, 2))
+    inferior.write_memory(rip, syscall_instruction, 2)
+    #set register values
+    gdb.execute("set $rax = 9")
+    gdb.execute("set $rdi = " + str(address))
+    gdb.execute("set $rsi = " + str(PAGE_SIZE))
+    gdb.execute("set $rdx = " + str(prot))
+    gdb.execute("set $r10 = " + str(flags))
+    gdb.execute("set $r8 = " + str(-1))
+    gdb.execute("set $r9 = " + str(0))
+    gdb.execute("si")
+    ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
+    restore_registers(registers)
+    inferior.write_memory(rip, membackup, 2)
+    gdb.execute("set $rip = " + str(rip))
+    return ret
+
+def exec_munmap(address: int) -> int:
+    inferior = gdb.selected_inferior()
+    rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
+    registers = save_registers()
+    syscall_instruction = bytearray.fromhex("0f 05")
+    membackup = bytearray(inferior.read_memory(rip, 2))
+    inferior.write_memory(rip, syscall_instruction, 2)
+    #set register values
+    gdb.execute("set $rax = 11")
+    gdb.execute("set $rdi = " + str(address))
+    gdb.execute("set $rsi = " + str(PAGE_SIZE))
+    gdb.execute("si")
+    ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
+    restore_registers(registers)
+    inferior.write_memory(rip, membackup, 2)
+    gdb.execute("set $rip = " + str(rip))
+    return ret
+
+def alloc_trampoline_page(address: int) -> int:
+    ptr = exec_mmap(address, 7, 34)
+    if ptr == -1:
+        return 0
+    init_trampoline_bitmap(ptr)
+    return ptr
+
+def free_trampoline_page(address: int):
+    hdr = read_header(master_lib_path)
+    hdr.trampoline_page_ptr = 0
+    write_header(master_lib_path, hdr)
+    if exec_munmap(address) == -1:
+        raise gdb.GdbError("Couldn't unmap the page.")
+
+def get_trampoline_count(bitmap_address: int) -> int:
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
+    counter = 0
+    for word_index in range(TRAMPOLINE_BITMAP_SIZE):
+        for bit in range(8):
+            if (buffer[word_index] & (1 << bit)) != 0:
+                counter += 1
+    return counter
+
+def find_first_free_trampoline_index(bitmap_address: int) -> int:
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
+    for word_index in range(TRAMPOLINE_ARRAY_SIZE):
+        word = buffer[word_index]
+        for bit in range(8):
+            if (word & (1 << bit)) == 0:
+                #set bit
+                buffer[word_index] |= (1 << bit)
+                inferior.write_memory(bitmap_address, buffer, len(buffer))
+                return word_index*8 + bit
+    #TODO proper return error value when no free left
+    return -1
+
+def alloc_trampoline(target_function_address: int) -> int:
+    hdr = read_header(master_lib_path)
+    if hdr.trampoline_page_ptr == 0:
+        page_base = find_nearest_free_page(target_function_address)
+        if page_base == 0:
+            return 0
+        alloc_trampoline_page(page_base)
+        hdr.trampoline_page_ptr = page_base
+        write_header(master_lib_path, hdr)
+    index = find_first_free_trampoline_index(hdr.trampoline_page_ptr)
+    return hdr.trampoline_page_ptr + TRAMPOLINE_BITMAP_SIZE + index*PADDED_TRAMPOLINE_SIZE
+
+def free_trampoline(trampoline_address: int):
+    hdr = read_header(master_lib_path)
+    if hdr.trampoline_page_ptr == 0:
+        return
+    index = int((trampoline_address - hdr.trampoline_page_ptr - TRAMPOLINE_BITMAP_SIZE) / 16)
+    word_index = int(index / 8)
+    bit_index = index % 8
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(hdr.trampoline_page_ptr, TRAMPOLINE_BITMAP_SIZE))
+    #reset bit
+    buffer[word_index] &= (~(1 << bit_index))
+    inferior.write_memory(hdr.trampoline_page_ptr, buffer, len(buffer))
+    if get_trampoline_count(hdr.trampoline_page_ptr) <= 0:
+        free_trampoline_page(hdr.trampoline_page_ptr)
 
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     dlsym = find_object("dlsym")
@@ -362,6 +534,7 @@ def copy_log(dest: str, src: str):
     dest_hdr.contains_log = True
     dest_hdr.log_entries_count = src_hdr.log_entries_count
     dest_hdr.patch_data_array_len = src_hdr.patch_data_array_len
+    dest_hdr.trampoline_page_ptr = src_hdr.trampoline_page_ptr
     write_header(dest, dest_hdr)
     inferior = gdb.selected_inferior()
     log_buffer = bytearray(inferior.read_memory(src_log, src_hdr.log_entries_count*LOG_ENTRY_SIZE))
@@ -426,7 +599,7 @@ class AbsoluteTrampoline:
        self.trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3")
 
     def size(self) -> int:
-        return 13
+        return len(self.trampoline)
 
     def complete_address(self, addr: bytearray):
         for i in range(8):
@@ -434,11 +607,31 @@ class AbsoluteTrampoline:
 
     def write_trampoline(self, address: gdb.Value):
         inferior = gdb.selected_inferior()
-        inferior.write_memory(address, self.trampoline, 13)
+        inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
     def write_trampoline_int(self, address: int):
         inferior = gdb.selected_inferior()
-        inferior.write_memory(address, self.trampoline, 13)
+        inferior.write_memory(address, self.trampoline, len(self.trampoline))
+
+class AlignedAbsoluteTrampoline(AbsoluteTrampoline):
+    def __init__(self):
+        self.trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3 90 90 90")
+
+class RelativeTrampoline:
+    def __init__(self):
+        self.trampoline = bytearray.fromhex("e9 00 00 00 00")
+
+    def size(self) -> int:
+        return len(self.trampoline)
+
+    def complete_address(self, address: int):
+        offset = address.to_bytes(4, "little")
+        for i in range(4):
+            self.trampoline[i+1] = offset[i]
+
+    def write_trampoline(self, address: int):
+        inferior = gdb.selected_inferior()
+        inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
 class PatchStrategy:
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
