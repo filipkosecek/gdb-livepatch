@@ -625,7 +625,7 @@ class RelativeTrampoline:
         return len(self.trampoline)
 
     def complete_address(self, address: int):
-        offset = address.to_bytes(4, "little")
+        offset = address.to_bytes(4, "little", signed=True)
         for i in range(4):
             self.trampoline[i+1] = offset[i]
 
