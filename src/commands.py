@@ -735,7 +735,7 @@ class PatchLibStrategy (PatchStrategy):
         addr_got = next_instruction.cast(gdb.lookup_type("char").pointer())
         addr_got += relative_addr
         self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
-        patch_arr = patch.to_bytes(8, byteorder = "little")
+        patch_arr = patch.to_bytes(8, byteorder = "little", signed=True)
 
         #steal refcount
         steal_refcount(target_ptr, self.path)
@@ -923,7 +923,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
             elif entry.patch_type == "L":
                 instruction = entry.target_func_ptr + 2
-                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little")
+                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little", signed=True)
                 got_entry = entry.target_func_ptr + 6 + relative_offset
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
@@ -959,7 +959,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(function_address, membackup, len(membackup))
             elif entry.patch_type == "L":
                 instruction = function_address + 2
-                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little")
+                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little", signed=True)
                 got_entry = function_address + 6 + relative_offset
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
@@ -1008,7 +1008,7 @@ class ReapplyPatch(gdb.Command):
         elif log_entry.patch_type == "L":
             instruction_ptr = log_entry.target_func_ptr + 2
             inferior = gdb.selected_inferior()
-            relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), "little")
+            relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), "little", signed=True)
             instruction_ptr += 4
             got_entry = instruction_ptr + relative_offset
             inferior.write(log_entry.patch_func_ptr.to_bytes(8, "little"))
