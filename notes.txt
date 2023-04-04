@@ -15,9 +15,7 @@ hlavny todo list:
 -v pripade stripnutej binarky vypytat adresu (rovnako aj pri revertovani patchu)
 	-upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
 -upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
--pridat kontrolu ci je proces pripojeny
--dorobit druhy cas pri log entry (t.j. kedy bol naposledy patch vykonany)
--kratsie trampoliny
 -ak sa nedaju najst symboly, pridat moznost ze pouzivatel zada adresy manualne
 -selected_inferior() upravit; patch_header, patch_log, ... definovat ako konstanty
+-kombinovanie absolutnych a relativnych trampolin sposobilo chybu
 -mozne upravy: pridat dumpovanie logu do suboru, prepinace (napriklad uplne vypnut log)

@@ -304,8 +304,12 @@ def free_trampoline(trampoline_address: int):
     #reset bit
     buffer[word_index] &= (~(1 << bit_index))
     inferior.write_memory(hdr.trampoline_page_ptr, buffer, len(buffer))
-    if get_trampoline_count(hdr.trampoline_page_ptr) <= 0:
-        free_trampoline_page(hdr.trampoline_page_ptr)
+
+def free_trampoline_from_instruction(instruction_ptr: int):
+    inferior = gdb.selected_inferior()
+    instruction_ptr += 1
+    relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, SHORT_TRAMPOLINE_SIZE - 1)), "little", signed=True)
+    free_trampoline(instruction_ptr + SHORT_TRAMPOLINE_SIZE + relative_offset)
 
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     dlsym = find_object("dlsym")
@@ -505,6 +509,8 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
         entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(entry).path
+            if entry.membackup_len == SHORT_TRAMPOLINE_SIZE:
+                free_trampoline_from_instruction(entry.target_func_ptr)
             entry.is_active = False
             write_log_entry(entry, i)
         i -= 1
@@ -546,9 +552,10 @@ def copy_log(dest: str, src: str):
 def close_lib(lib: str):
     global master_lib_path
     hdr = read_header(lib)
+    is_last = False
     if hdr.contains_log:
-        master_lib_path = ""
         hdr.contains_log = False
+        is_last = True
         write_header(lib, hdr)
         for objfile in gdb.objfiles():
             try:
@@ -557,9 +564,12 @@ def close_lib(lib: str):
                 continue
             if header is None:
                 continue
-            if header.magic == MAGIC_CONSTANT:
+            if header.magic == MAGIC_CONSTANT and objfile.filename != lib:
                 copy_log(objfile.filename, lib)
-
+                is_last = False
+    if is_last:
+        free_trampoline_page(hdr.trampoline_page_ptr)
+        master_lib_path = ""
     dlclose = find_object("dlclose")
     dlclose(hdr.libhandle)
 
@@ -625,7 +635,7 @@ class RelativeTrampoline:
         return len(self.trampoline)
 
     def complete_address(self, address: int):
-        offset = address.to_bytes(4, "little")
+        offset = address.to_bytes(4, "little", signed=True)
         for i in range(4):
             self.trampoline[i+1] = offset[i]
 
@@ -688,21 +698,35 @@ class PatchOwnStrategy (PatchStrategy):
             entry.path_len = len(self.path)
 
         tmp = find_first_patch(self.target_addr)
+        ret = alloc_trampoline(self.target_addr)
         if tmp is None:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, 13))
+            if ret != 0:
+                backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, SHORT_TRAMPOLINE_SIZE))
+            else:
+                backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
-        add_log_entry(entry, backup)
 
         #write trampoline
-        trampoline = AbsoluteTrampoline()
         inferior = gdb.selected_inferior()
-        self.membackup = bytearray(inferior.read_memory(target_addr.cast(gdb.lookup_type("char").pointer()), trampoline.size()))
-        trampoline.complete_address(patch_addr_arr)
-        #cast target_addr to char *
-        trampoline.write_trampoline(target_addr.cast(gdb.lookup_type("char").pointer()))
+        if ret == 0:
+            trampoline = AbsoluteTrampoline()
+            trampoline.complete_address(patch_addr_arr)
+            #cast target_addr to char *
+            trampoline.write_trampoline(target_addr.cast(gdb.lookup_type("char").pointer()))
+        else:
+            short_trampoline = RelativeTrampoline()
+            long_trampoline = AbsoluteTrampoline()
+            long_trampoline.complete_address(patch_addr.to_bytes(8, BYTE_ORDER))
+            relative_offset = ret - self.target_addr - SHORT_TRAMPOLINE_SIZE
+            short_trampoline.complete_address(relative_offset)
+            long_trampoline.write_trampoline_int(ret)
+            short_trampoline.write_trampoline(self.target_addr)
+
+        #write changes to the log
+        add_log_entry(entry, backup)
 
     def clean(self):
         self.dlclose(self.lib_handle)
@@ -895,8 +919,9 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
     result = None
     for i in range(size):
         entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
-        #TODO when applying a patch you must scan if a function has been patched to assign the corresponding memory backup
         if entry.target_func_ptr == func_address and entry.is_active:
+            if entry.membackup_len == SHORT_TRAMPOLINE_SIZE:
+                free_trampoline_from_instruction(entry.target_func_ptr)
             entry.is_active = False
             write_log_entry(entry, i)
             return entry
@@ -919,7 +944,9 @@ class ReapplyPatch(gdb.Command):
             if backup.path is None or backup.membackup is None:
                 raise gdb.GdbError("Cannot find memory backup or path.")
             if entry.patch_type == "O":
-                #TODO only absolute trampoline for now
+                if len(backup.membackup) == SHORT_TRAMPOLINE_SIZE:
+                    free_trampoline_from_instruction(entry.target_func_ptr)
+
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
             elif entry.patch_type == "L":
                 instruction = entry.target_func_ptr + 2
@@ -944,7 +971,10 @@ class ReapplyPatch(gdb.Command):
             entry = find_active_entry_and_set_as_inactive(function_address)
             if entry is None:
                 #try to find library function
-                function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+                try:
+                    function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+                except:
+                    raise gdb.GdbError("Nothing to revert.")
                 entry = find_active_entry_and_set_as_inactive(function_address)
                 if entry is None:
                     raise gdb.GdbError("Nothing to revert.")
@@ -955,7 +985,8 @@ class ReapplyPatch(gdb.Command):
             if path is None or membackup is None:
                 raise gdb.GdbError("Fatal error, couldn't find membackup.")
             if entry.patch_type == "O":
-                #TODO only absolute trampoline for now
+                if len(membackup) == SHORT_TRAMPOLINE_SIZE:
+                    free_trampoline_from_instruction(entry.target_func_ptr)
                 inferior.write_memory(function_address, membackup, len(membackup))
             elif entry.patch_type == "L":
                 instruction = function_address + 2
@@ -1002,9 +1033,22 @@ class ReapplyPatch(gdb.Command):
             #the lib is unmapped
             raise gdb.GdbError("The library has been closed. Cannot apply the patch. To apply the patch, use patch command.")
         if log_entry.patch_type == "O":
-            trampoline = AbsoluteTrampoline()
-            trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
-            trampoline.write_trampoline_int(log_entry.target_func_ptr)
+            if log_entry.membackup_len == ABSOLUTE_TRAMPOLINE_SIZE:
+                trampoline = AbsoluteTrampoline()
+                trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
+                trampoline.write_trampoline_int(log_entry.target_func_ptr)
+            else:
+                long_trampoline = AlignedAbsoluteTrampoline()
+                short_trampoline = RelativeTrampoline()
+                long_trampoline.complete_address(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER))
+                ret = alloc_trampoline(log_entry.target_func_ptr)
+                if ret == 0:
+                    raise gdb.GdbError("Cannot allocate a trampoline.")
+                long_trampoline.write_trampoline_int(ret)
+                relative_offset = ret - log_entry.target_func_ptr - SHORT_TRAMPOLINE_SIZE
+                short_trampoline.complete_address(relative_offset)
+                short_trampoline.write_trampoline(log_entry.target_func_ptr)
+
         elif log_entry.patch_type == "L":
             instruction_ptr = log_entry.target_func_ptr + 2
             inferior = gdb.selected_inferior()
