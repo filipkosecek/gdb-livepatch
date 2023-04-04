@@ -625,7 +625,7 @@ class RelativeTrampoline:
         return len(self.trampoline)
 
     def complete_address(self, address: int):
-        offset = address.to_bytes(4, "little", signed=True)
+        offset = address.to_bytes(4, "little")
         for i in range(4):
             self.trampoline[i+1] = offset[i]
 
@@ -735,7 +735,7 @@ class PatchLibStrategy (PatchStrategy):
         addr_got = next_instruction.cast(gdb.lookup_type("char").pointer())
         addr_got += relative_addr
         self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
-        patch_arr = patch.to_bytes(8, byteorder = "little", signed=True)
+        patch_arr = patch.to_bytes(8, byteorder = "little")
 
         #steal refcount
         steal_refcount(target_ptr, self.path)
