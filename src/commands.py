@@ -698,18 +698,15 @@ class PatchOwnStrategy (PatchStrategy):
             entry.path_len = len(self.path)
 
         tmp = find_first_patch(self.target_addr)
-        ret = alloc_trampoline(self.target_addr)
         if tmp is None:
-            if ret != 0:
-                backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, SHORT_TRAMPOLINE_SIZE))
-            else:
-                backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
 
         #write trampoline
+        ret = alloc_trampoline(self.target_addr)
         inferior = gdb.selected_inferior()
         if ret == 0:
             trampoline = AbsoluteTrampoline()

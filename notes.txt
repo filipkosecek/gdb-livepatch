@@ -18,4 +18,10 @@ hlavny todo list:
 -ak sa nedaju najst symboly, pridat moznost ze pouzivatel zada adresy manualne
 -selected_inferior() upravit; patch_header, patch_log, ... definovat ako konstanty
 -kombinovanie absolutnych a relativnych trampolin sposobilo chybu
+
+-ktora trampolina sa pouzije
+-kedy sa ma patch vykonat (call stack)
+-skontrolovat kam sa zapisuje syscall/trampolina - ci to nie je na hranici stranky
+-umoznit zadat hex adresu namiesto nazvu funkcie
 -mozne upravy: pridat dumpovanie logu do suboru, prepinace (napriklad uplne vypnut log)
+-vhodne vyriesit problemy s hladanim kniznicnych funkcii
