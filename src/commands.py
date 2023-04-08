@@ -362,6 +362,11 @@ class struct_log_entry:
         tmp = " "
         if self.is_active:
             tmp = "* "
+
+        try:
+            gdb.lookup_objfile(path)
+        except:
+            return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", "unknown function (library is closed)"])
         return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", patch_func_str])
 
 def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:

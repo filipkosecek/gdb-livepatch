@@ -12,16 +12,14 @@
 https://stackoverflow.com/questions/70177811/how-do-i-use-the-second-value-constructor-in-gdbs-python-api
 
 hlavny todo list:
--v pripade stripnutej binarky vypytat adresu (rovnako aj pri revertovani patchu)
-	-upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
+-upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
 -upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
 -ak sa nedaju najst symboly, pridat moznost ze pouzivatel zada adresy manualne
--selected_inferior() upravit; patch_header, patch_log, ... definovat ako konstanty
--kombinovanie absolutnych a relativnych trampolin sposobilo chybu
-
 -ktora trampolina sa pouzije
 -kedy sa ma patch vykonat (call stack)
 -skontrolovat kam sa zapisuje syscall/trampolina - ci to nie je na hranici stranky
 -umoznit zadat hex adresu namiesto nazvu funkcie
 -mozne upravy: pridat dumpovanie logu do suboru, prepinace (napriklad uplne vypnut log)
 -vhodne vyriesit problemy s hladanim kniznicnych funkcii
+-pri logu vypisat pre kniznicne funkcie len nazov (nie funkcia@plt)
+-pri alokovani stranky upravit algoritmus na hladanie najblizsej stranky a pridat kontrolu ci je dost blizko
