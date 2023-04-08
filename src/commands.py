@@ -20,12 +20,15 @@ PATCH_COMMANDS_VAR_NAME = "patch_commands"
 
 HEX_REGEX = "0x[1-9a-f][0-9a-f]*"
 DECIMAL_REGEX = "[1-9][0-9]*"
+MAPPINGS_LINE_REGEX = "^ *" + HEX_REGEX + " *" + HEX_REGEX + " *" + HEX_REGEX
 
 TRAMPOLINE_BITMAP_SIZE = 32
 TRAMPOLINE_ARRAY_SIZE = 254
 ABSOLUTE_TRAMPOLINE_SIZE = 13
 PADDED_TRAMPOLINE_SIZE = 16
 SHORT_TRAMPOLINE_SIZE = 5
+
+MAX_PAGE_DIST = pow(2, 25)
 
 master_lib_path = ""
 
@@ -148,30 +151,37 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
 
-def find_mappings() -> set[int]:
+def find_mappings() -> tuple[set[int], dict[int, int]]:
     mappings = gdb.execute("info proc mappings", to_string=True)
-    mappings_list = re.findall("^ *" + HEX_REGEX, mappings, re.MULTILINE)
-    result = set()
-    for page in mappings_list:
-        result.add(int(page, 16))
-    return result
+    mappings_list = re.findall(MAPPINGS_LINE_REGEX, mappings, re.MULTILINE)
+    allocated_pages = set()
+    allocated_pages_sizes = dict()
+    for line in mappings_list:
+        tmp = line.split()
+        page = int(tmp[0], 16)
+        size = int(tmp[2], 16)
+        allocated_pages.add(page)
+        allocated_pages_sizes[page] = size
+    return allocated_pages, allocated_pages_sizes
 
-#TODO add check if page is not too far
 def find_nearest_free_page(address: int) -> int:
     current = address & 0xfffffffffffff000
-    allocated_pages = find_mappings()
-    #check left
-    tmp = current - PAGE_SIZE
-    while tmp > 0:
-        if tmp not in allocated_pages:
-            return tmp
-        tmp -= PAGE_SIZE
-    #check right
-    tmp = current + PAGE_SIZE
-    while tmp < 0x7fffffffffff:
-        if tmp not in allocated_pages:
-            return tmp
-        tmp += PAGE_SIZE
+    ret = find_mappings()
+    allocated_pages = ret[0]
+    allocated_pages_sizes = ret[1]
+    left = current
+    right = current
+    while left > 0 or right < 0x7fffffffffff:
+        if left > 0:
+            if abs(left - current) <= MAX_PAGE_DIST and left not in allocated_pages:
+                return left
+            left -= allocated_pages_sizes[left]
+
+        if right < 0x7fffffffffff:
+            if abs(right - current) <= MAX_PAGE_DIST and right not in allocated_pages:
+                return right
+            right += allocated_pages_sizes[right]
+
     return 0
 
 def init_trampoline_bitmap(address: int):
@@ -180,6 +190,7 @@ def init_trampoline_bitmap(address: int):
 
 def save_registers() -> dict[str, int]:
     result = dict()
+    result["rip"] = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
     result["rax"] = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
     result["rbx"] = int(gdb.parse_and_eval("$rbx").cast(gdb.lookup_type("uint64_t")))
     result["rcx"] = int(gdb.parse_and_eval("$rcx").cast(gdb.lookup_type("uint64_t")))
@@ -204,8 +215,8 @@ def restore_registers(registers: dict[str, int]):
 
 def exec_mmap(address: int, prot: int, flags: int) -> int:
     inferior = gdb.selected_inferior()
-    rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
     registers = save_registers()
+    rip = registers["rip"]
     syscall_instruction = bytearray.fromhex("0f 05")
     membackup = bytearray(inferior.read_memory(rip, 2))
     inferior.write_memory(rip, syscall_instruction, 2)
@@ -221,13 +232,12 @@ def exec_mmap(address: int, prot: int, flags: int) -> int:
     ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
     restore_registers(registers)
     inferior.write_memory(rip, membackup, 2)
-    gdb.execute("set $rip = " + str(rip))
     return ret
 
 def exec_munmap(address: int) -> int:
     inferior = gdb.selected_inferior()
-    rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
     registers = save_registers()
+    rip = registers["rip"]
     syscall_instruction = bytearray.fromhex("0f 05")
     membackup = bytearray(inferior.read_memory(rip, 2))
     inferior.write_memory(rip, syscall_instruction, 2)
@@ -239,7 +249,6 @@ def exec_munmap(address: int) -> int:
     ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
     restore_registers(registers)
     inferior.write_memory(rip, membackup, 2)
-    gdb.execute("set $rip = " + str(rip))
     return ret
 
 def alloc_trampoline_page(address: int) -> int:
@@ -277,7 +286,6 @@ def find_first_free_trampoline_index(bitmap_address: int) -> int:
                 buffer[word_index] |= (1 << bit)
                 inferior.write_memory(bitmap_address, buffer, len(buffer))
                 return word_index*8 + bit
-    #TODO proper return error value when no free left
     return -1
 
 def alloc_trampoline(target_function_address: int) -> int:
@@ -290,6 +298,8 @@ def alloc_trampoline(target_function_address: int) -> int:
         hdr.trampoline_page_ptr = page_base
         write_header(master_lib_path, hdr)
     index = find_first_free_trampoline_index(hdr.trampoline_page_ptr)
+    if index == -1:
+        return 0
     return hdr.trampoline_page_ptr + TRAMPOLINE_BITMAP_SIZE + index*PADDED_TRAMPOLINE_SIZE
 
 def free_trampoline(trampoline_address: int):
@@ -514,10 +524,12 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
         entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(entry).path
-            if entry.membackup_len == SHORT_TRAMPOLINE_SIZE:
+            instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
+            if instruction_prefix[0] == 0xe9:
                 free_trampoline_from_instruction(entry.target_func_ptr)
             entry.is_active = False
             write_log_entry(entry, i)
+            break
         i -= 1
     return result
 
@@ -835,7 +847,7 @@ class Patch (gdb.Command):
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None or header.magic != MAGIC_CONSTANT:
-            raise gdb.GdbError("`Object file " + path + " has a wrong format.")
+            raise gdb.GdbError("Object file " + path + " has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
         
@@ -922,7 +934,8 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
     for i in range(size):
         entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
         if entry.target_func_ptr == func_address and entry.is_active:
-            if entry.membackup_len == SHORT_TRAMPOLINE_SIZE:
+            instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
+            if instruction_prefix[0] == 0xe9:
                 free_trampoline_from_instruction(entry.target_func_ptr)
             entry.is_active = False
             write_log_entry(entry, i)
@@ -946,7 +959,8 @@ class ReapplyPatch(gdb.Command):
             if backup.path is None or backup.membackup is None:
                 raise gdb.GdbError("Cannot find memory backup or path.")
             if entry.patch_type == "O":
-                if len(backup.membackup) == SHORT_TRAMPOLINE_SIZE:
+                instruction_prefix = bytearray(inferior.read_memory(entry.target_func_ptr, 1))
+                if instruction_prefix[0] == 0xe9:
                     free_trampoline_from_instruction(entry.target_func_ptr)
 
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
@@ -987,7 +1001,8 @@ class ReapplyPatch(gdb.Command):
             if path is None or membackup is None:
                 raise gdb.GdbError("Fatal error, couldn't find membackup.")
             if entry.patch_type == "O":
-                if len(membackup) == SHORT_TRAMPOLINE_SIZE:
+                instruction_prefix = bytearray(inferior.read_memory(entry.target_func_ptr, 1))
+                if instruction_prefix[0] == 0xe9:
                     free_trampoline_from_instruction(entry.target_func_ptr)
                 inferior.write_memory(function_address, membackup, len(membackup))
             elif entry.patch_type == "L":
