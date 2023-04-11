@@ -22,5 +22,6 @@ hlavny todo list:
 -mozne upravy: pridat dumpovanie logu do suboru, prepinace (napriklad uplne vypnut log)
 -vhodne vyriesit problemy s hladanim kniznicnych funkcii
 -pri logu vypisat pre kniznicne funkcie len nazov (nie funkcia@plt)
+	-ak sa kniznica zavrie, vypise sa nejaka blbost (adresa je uvolnena)
 -pri alokovani stranky upravit algoritmus na hladanie najblizsej stranky a pridat kontrolu ci je dost blizko
 	-pokial treba prehladavat, aka rezerva, ked je blizko k jednej funkcii, nemusi byt k inej

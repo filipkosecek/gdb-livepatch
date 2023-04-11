@@ -74,7 +74,11 @@ def addr_to_symbol(address: int) -> str:
     match = re.match("No symbol matches .*\.", cmd)
     if match:
         return None
-    return cmd.split(' ')[0]
+    result = cmd.split(' ')[0]
+    match = re.match(".+@plt", result)
+    if match:
+        result = result.split('@')[0]
+    return result
 
 class struct_header:
     def __init__(self, magic: int, libhandle: int, trampoline_page_ptr: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
@@ -585,7 +589,8 @@ def close_lib(lib: str):
                 copy_log(objfile.filename, lib)
                 is_last = False
     if is_last:
-        free_trampoline_page(hdr.trampoline_page_ptr)
+        if hdr.trampoline_page_ptr != 0:
+            free_trampoline_page(hdr.trampoline_page_ptr)
         master_lib_path = ""
     dlclose = find_object("dlclose")
     dlclose(hdr.libhandle)
