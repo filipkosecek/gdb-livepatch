@@ -3,25 +3,41 @@ import time
 import re
 from datetime import datetime
 
+type_list = ["uint64_t"]
+
+#x86_64 architecture specific
+PAGE_SIZE = 4096
 BYTE_ORDER = "little"
 
-PAGE_SIZE = 4096
+#metadata structures sizes and names
 MAGIC_CONSTANT = 1024
 HEADER_SIZE = 32
 LOG_ENTRY_SIZE = 32
-type_list = ["char", "uint64_t", "int32_t"]
 LOG_SIZE = 2*4096
 PATCH_BACKUP_SIZE = PAGE_SIZE
-
 PATCH_HEADER_VAR_NAME = "patch_header"
 PATCH_LOG_VAR_NAME = "patch_log"
 PATCH_LOG_DATA_VAR_NAME = "patch_backup"
 PATCH_COMMANDS_VAR_NAME = "patch_commands"
 
+#syscall numbers
+SYS_MMAP = 9
+SYS_MPROTECT = 10
+SYS_MUNMAP = 11
+#mman prot
+PROT_READ = 1
+PROT_WRITE = 2
+PROT_EXEC = 4
+#mman flags
+MAP_PRIVATE = 2
+MAP_ANONYMOUS = 32
+
+#regexes
 HEX_REGEX = "0x[1-9a-f][0-9a-f]*"
 DECIMAL_REGEX = "[1-9][0-9]*"
 MAPPINGS_LINE_REGEX = "^ *" + HEX_REGEX + " *" + HEX_REGEX + " *" + HEX_REGEX
 
+#trampolines
 TRAMPOLINE_BITMAP_SIZE = 32
 TRAMPOLINE_ARRAY_SIZE = 254
 ABSOLUTE_TRAMPOLINE_SIZE = 13
@@ -114,22 +130,22 @@ def read_header(objfile_path: str) -> struct_header:
     except:
         return None
     buffer = inferior.read_memory(header_addr, HEADER_SIZE)
-    magic = int.from_bytes(buffer[:4], "little")
+    magic = int.from_bytes(buffer[:4], BYTE_ORDER)
     if magic != MAGIC_CONSTANT:
         return None
-    libhandle = int.from_bytes(buffer[4:12], "little")
-    trampoline_page_ptr = int.from_bytes(buffer[12:20], "little")
-    refcount = int.from_bytes(buffer[20:22], "little")
-    contains_log = int.from_bytes(buffer[22:24], "little")
+    libhandle = int.from_bytes(buffer[4:12], BYTE_ORDER)
+    trampoline_page_ptr = int.from_bytes(buffer[12:20], BYTE_ORDER)
+    refcount = int.from_bytes(buffer[20:22], BYTE_ORDER)
+    contains_log = int.from_bytes(buffer[22:24], BYTE_ORDER)
     if contains_log == 0:
         contains_log_bool = False
     elif contains_log == 1:
         contains_log_bool = True
     else:
         raise gdb.GdbError("Got wrong value for contains_log value.")
-    log_entries_count = int.from_bytes(buffer[24:26], "little")
-    patch_data_array_len = int.from_bytes(buffer[26:28], "little")
-    commands_len = int.from_bytes(buffer[28:32], "little")
+    log_entries_count = int.from_bytes(buffer[24:26], BYTE_ORDER)
+    patch_data_array_len = int.from_bytes(buffer[26:28], BYTE_ORDER)
+    commands_len = int.from_bytes(buffer[28:32], BYTE_ORDER)
     return struct_header(magic, libhandle, trampoline_page_ptr, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
 
 def write_header(objfile_path: str, header: struct_header) -> None:
@@ -139,18 +155,18 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     header_addr = find_object_static(PATCH_HEADER_VAR_NAME, objfile_path)
 
     buffer = bytearray()
-    buffer.extend(header.magic.to_bytes(4, "little"))
-    buffer.extend(header.libhandle.to_bytes(8, "little"))
-    buffer.extend(header.trampoline_page_ptr.to_bytes(8, "little"))
-    buffer.extend(header.refcount.to_bytes(2, "little"))
+    buffer.extend(header.magic.to_bytes(4, BYTE_ORDER))
+    buffer.extend(header.libhandle.to_bytes(8, BYTE_ORDER))
+    buffer.extend(header.trampoline_page_ptr.to_bytes(8, BYTE_ORDER))
+    buffer.extend(header.refcount.to_bytes(2, BYTE_ORDER))
     if header.contains_log:
         tmp = 1
     else:
         tmp = 0
-    buffer.extend(tmp.to_bytes(2, "little"))
-    buffer.extend(header.log_entries_count.to_bytes(2, "little"))
-    buffer.extend(header.patch_data_array_len.to_bytes(2, "little"))
-    buffer.extend(header.commands_len.to_bytes(4, "little"))
+    buffer.extend(tmp.to_bytes(2, BYTE_ORDER))
+    buffer.extend(header.log_entries_count.to_bytes(2, BYTE_ORDER))
+    buffer.extend(header.patch_data_array_len.to_bytes(2, BYTE_ORDER))
+    buffer.extend(header.commands_len.to_bytes(4, BYTE_ORDER))
 
     inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
@@ -217,7 +233,9 @@ def restore_registers(registers: dict[str, int]):
     for reg in registers:
         gdb.execute("set $" + reg + "=" + str(registers[reg]))
 
-def exec_mmap(address: int, prot: int, flags: int) -> int:
+def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int) -> int:
+    if syscall_number < 0 or syscall_number > 332:
+        raise gdb.GdbError("No such system call.")
     inferior = gdb.selected_inferior()
     registers = save_registers()
     rip = registers["rip"]
@@ -225,38 +243,30 @@ def exec_mmap(address: int, prot: int, flags: int) -> int:
     membackup = bytearray(inferior.read_memory(rip, 2))
     inferior.write_memory(rip, syscall_instruction, 2)
     #set register values
-    gdb.execute("set $rax = 9")
-    gdb.execute("set $rdi = " + str(address))
-    gdb.execute("set $rsi = " + str(PAGE_SIZE))
-    gdb.execute("set $rdx = " + str(prot))
-    gdb.execute("set $r10 = " + str(flags))
-    gdb.execute("set $r8 = " + str(-1))
-    gdb.execute("set $r9 = " + str(0))
+    gdb.execute("set $rax = " + str(syscall_number))
+    gdb.execute("set $rdi = " + str(arg1))
+    gdb.execute("set $rsi = " + str(arg2))
+    gdb.execute("set $rdx = " + str(arg3))
+    gdb.execute("set $r10 = " + str(arg4))
+    gdb.execute("set $r8 = " + str(arg5))
+    gdb.execute("set $r9 = " + str(arg6))
     gdb.execute("si")
     ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
     restore_registers(registers)
     inferior.write_memory(rip, membackup, 2)
     return ret
 
-def exec_munmap(address: int) -> int:
-    inferior = gdb.selected_inferior()
-    registers = save_registers()
-    rip = registers["rip"]
-    syscall_instruction = bytearray.fromhex("0f 05")
-    membackup = bytearray(inferior.read_memory(rip, 2))
-    inferior.write_memory(rip, syscall_instruction, 2)
-    #set register values
-    gdb.execute("set $rax = 11")
-    gdb.execute("set $rdi = " + str(address))
-    gdb.execute("set $rsi = " + str(PAGE_SIZE))
-    gdb.execute("si")
-    ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
-    restore_registers(registers)
-    inferior.write_memory(rip, membackup, 2)
-    return ret
+def exec_mmap(address: int, size: int, prot: int, flags: int, fd: int, offset: int) -> int:
+    return exec_syscall(SYS_MMAP, address, size, prot, flags, fd, offset)
+
+def exec_munmap(address: int, size: int) -> int:
+    return exec_syscall(SYS_MUNMAP, address, size, 0, 0, 0, 0)
+
+def exec_mprotect(address: int, size: int, prot: int) -> int:
+    return exec_syscall(SYS_MPROTECT, address, size, prot, 0, 0, 0)
 
 def alloc_trampoline_page(address: int) -> int:
-    ptr = exec_mmap(address, 7, 34)
+    ptr = exec_mmap(address, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if ptr == -1:
         return 0
     init_trampoline_bitmap(ptr)
@@ -266,7 +276,7 @@ def free_trampoline_page(address: int):
     hdr = read_header(master_lib_path)
     hdr.trampoline_page_ptr = 0
     write_header(master_lib_path, hdr)
-    if exec_munmap(address) == -1:
+    if exec_munmap(address, PAGE_SIZE) == -1:
         raise gdb.GdbError("Couldn't unmap the page.")
 
 def get_trampoline_count(bitmap_address: int) -> int:
@@ -322,7 +332,7 @@ def free_trampoline(trampoline_address: int):
 def free_trampoline_from_instruction(instruction_ptr: int):
     inferior = gdb.selected_inferior()
     instruction_ptr += 1
-    relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, SHORT_TRAMPOLINE_SIZE - 1)), "little", signed=True)
+    relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, SHORT_TRAMPOLINE_SIZE - 1)), BYTE_ORDER, signed=True)
     free_trampoline(instruction_ptr + SHORT_TRAMPOLINE_SIZE + relative_offset)
 
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
@@ -384,16 +394,16 @@ class struct_log_entry:
         return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", patch_func_str])
 
 def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
-    target_func_ptr = int.from_bytes(buffer[0:8], "little")
-    patch_func_ptr = int.from_bytes(buffer[8:16], "little")
-    patch_type = int.from_bytes(buffer[16:17], "little")
+    target_func_ptr = int.from_bytes(buffer[0:8], BYTE_ORDER)
+    patch_func_ptr = int.from_bytes(buffer[8:16], BYTE_ORDER)
+    patch_type = int.from_bytes(buffer[16:17], BYTE_ORDER)
     if patch_type == 0:
         patch_type_str = "O"
     else:
         patch_type_str = "L"
-    timestamp = int.from_bytes(buffer[17:21], "little")
-    path_offset = int.from_bytes(buffer[21:25], "little")
-    is_active_int = int.from_bytes(buffer[25:27], "little")
+    timestamp = int.from_bytes(buffer[17:21], BYTE_ORDER)
+    path_offset = int.from_bytes(buffer[21:25], BYTE_ORDER)
+    is_active_int = int.from_bytes(buffer[25:27], BYTE_ORDER)
     if is_active_int == 0:
         is_active = False
     elif is_active_int == 1:
@@ -401,9 +411,9 @@ def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
     else:
         raise gdb.GdbError("Got wrong value of is_active")
 
-    membackup_offset = int.from_bytes(buffer[27:29], "little")
-    path_len = int.from_bytes(buffer[29:31], "little")
-    membackup_len = int.from_bytes(buffer[31:32], "little")
+    membackup_offset = int.from_bytes(buffer[27:29], BYTE_ORDER)
+    path_len = int.from_bytes(buffer[29:31], BYTE_ORDER)
+    membackup_len = int.from_bytes(buffer[31:32], BYTE_ORDER)
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
 def read_log_entry(index: int) -> struct_log_entry:
@@ -426,8 +436,8 @@ def read_log_entry(index: int) -> struct_log_entry:
 
 def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
     log_entry_buf = bytearray()
-    log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, "little"))
-    log_entry_buf.extend(log_entry.patch_func_ptr.to_bytes(8, "little"))
+    log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER))
     if log_entry.patch_type == "O":
         tmp = 0
     elif log_entry.patch_type == "L":
@@ -435,17 +445,17 @@ def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
     else:
         tmp = 255
 
-    log_entry_buf.extend(tmp.to_bytes(1, "little"))
-    log_entry_buf.extend(log_entry.timestamp.to_bytes(4, "little"))
-    log_entry_buf.extend(log_entry.path_offset.to_bytes(4, "little"))
+    log_entry_buf.extend(tmp.to_bytes(1, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.timestamp.to_bytes(4, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.path_offset.to_bytes(4, BYTE_ORDER))
     if log_entry.is_active:
         tmp = 1
     else:
         tmp = 0
-    log_entry_buf.extend(tmp.to_bytes(2, "little"))
-    log_entry_buf.extend(log_entry.membackup_offset.to_bytes(2, "little"))
-    log_entry_buf.extend(log_entry.path_len.to_bytes(2, "little"))
-    log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, "little"))
+    log_entry_buf.extend(tmp.to_bytes(2, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.membackup_offset.to_bytes(2, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.path_len.to_bytes(2, BYTE_ORDER))
+    log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, BYTE_ORDER))
     return log_entry_buf
 
 def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
@@ -653,7 +663,7 @@ class RelativeTrampoline:
         return len(self.trampoline)
 
     def complete_address(self, address: int):
-        offset = address.to_bytes(4, "little", signed=True)
+        offset = address.to_bytes(4, BYTE_ORDER, signed=True)
         for i in range(4):
             self.trampoline[i+1] = offset[i]
 
@@ -704,7 +714,7 @@ class PatchOwnStrategy (PatchStrategy):
             patch_addr = find_object_dlsym(self.patch_func, self.path)
         except:
             raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
-        patch_addr_arr = patch_addr.to_bytes(8, byteorder = "little")
+        patch_addr_arr = patch_addr.to_bytes(8, byteorder = BYTE_ORDER)
 
         #steal refcount
         steal_refcount(target_addr, self.path)
@@ -772,7 +782,7 @@ class PatchLibStrategy (PatchStrategy):
 
         #calculate got.plt entry
         addr_got = next_instruction + relative_addr
-        patch_arr = patch.to_bytes(8, byteorder = "little")
+        patch_arr = patch.to_bytes(8, byteorder = BYTE_ORDER)
 
         #steal refcount
         steal_refcount(target_ptr, self.path)
@@ -936,7 +946,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
             elif entry.patch_type == "L":
                 instruction = entry.target_func_ptr + 2
-                relative_offset = int.from_bytes(inferior.read_memory(instruction, 4), "little", signed=True)
+                relative_offset = int.from_bytes(inferior.read_memory(instruction, 4), BYTE_ORDER, signed=True)
                 got_entry = entry.target_func_ptr + 6 + relative_offset
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
@@ -977,7 +987,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(function_address, membackup, len(membackup))
             elif entry.patch_type == "L":
                 instruction = function_address + 2
-                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little", signed=True)
+                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), BYTE_ORDER, signed=True)
                 got_entry = function_address + 6 + relative_offset
                 inferior.write_memory(got_entry, membackup, len(membackup))
 
@@ -1022,7 +1032,7 @@ class ReapplyPatch(gdb.Command):
         if log_entry.patch_type == "O":
             if log_entry.membackup_len == ABSOLUTE_TRAMPOLINE_SIZE:
                 trampoline = AbsoluteTrampoline()
-                trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
+                trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER)))
                 trampoline.write_trampoline(log_entry.target_func_ptr)
             else:
                 long_trampoline = AlignedAbsoluteTrampoline()
@@ -1039,10 +1049,10 @@ class ReapplyPatch(gdb.Command):
         elif log_entry.patch_type == "L":
             instruction_ptr = log_entry.target_func_ptr + 2
             inferior = gdb.selected_inferior()
-            relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), "little", signed=True)
+            relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), BYTE_ORDER, signed=True)
             instruction_ptr += 4
             got_entry = instruction_ptr + relative_offset
-            inferior.write(log_entry.patch_func_ptr.to_bytes(8, "little"))
+            inferior.write(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER))
 
         steal_refcount(log_entry.target_func_ptr, data.path)
         log_entry.is_active = True
