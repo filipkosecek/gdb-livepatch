@@ -637,11 +637,7 @@ class AbsoluteTrampoline:
         for i in range(8):
             self.trampoline[i+2] = addr[i]
 
-    def write_trampoline(self, address: gdb.Value):
-        inferior = gdb.selected_inferior()
-        inferior.write_memory(address, self.trampoline, len(self.trampoline))
-
-    def write_trampoline_int(self, address: int):
+    def write_trampoline(self, address: int):
         inferior = gdb.selected_inferior()
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
@@ -686,16 +682,16 @@ class PatchOwnStrategy (PatchStrategy):
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         try:
             target_addr = find_object(self.target_func)
-            self.target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
+            target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
         except:
+            #TODO
             self.clean()
             raise gdb.GdbError("Couldn't find target function symbol.")
 
         #control flow must not be where the trampoline is about to be inserted
         #TODO control flow must not be in the function, it may lead to crash
-        tmp = int(target_addr.cast(gdb.lookup_type("uint64_t")))
         rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
-        if rip >= tmp and rip < tmp + 13:
+        if rip >= target_addr and rip < target_addr + 13:
             self.clean()
             raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
 
@@ -707,10 +703,10 @@ class PatchOwnStrategy (PatchStrategy):
         patch_addr_arr = patch_addr.to_bytes(8, byteorder = "little")
 
         #steal refcount
-        steal_refcount(self.target_addr, self.path)
+        steal_refcount(target_addr, self.path)
 
         #write to log
-        entry = struct_log_entry(self.target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
+        entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
         backup = struct_patch_backup(None, None)
         if path_offset != -1:
             entry.path_offset = path_offset
@@ -719,30 +715,29 @@ class PatchOwnStrategy (PatchStrategy):
             backup.path = self.path
             entry.path_len = len(self.path)
 
-        tmp = find_first_patch(self.target_addr)
+        tmp = find_first_patch(target_addr)
         if tmp is None:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
+            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
 
         #write trampoline
-        ret = alloc_trampoline(self.target_addr)
+        ret = alloc_trampoline(target_addr)
         inferior = gdb.selected_inferior()
         if ret == 0:
             trampoline = AbsoluteTrampoline()
             trampoline.complete_address(patch_addr_arr)
-            #cast target_addr to char *
-            trampoline.write_trampoline(target_addr.cast(gdb.lookup_type("char").pointer()))
+            trampoline.write_trampoline(target_addr)
         else:
             short_trampoline = RelativeTrampoline()
             long_trampoline = AbsoluteTrampoline()
             long_trampoline.complete_address(patch_addr.to_bytes(8, BYTE_ORDER))
-            relative_offset = ret - self.target_addr - SHORT_TRAMPOLINE_SIZE
+            relative_offset = ret - target_addr - SHORT_TRAMPOLINE_SIZE
             short_trampoline.complete_address(relative_offset)
-            long_trampoline.write_trampoline_int(ret)
-            short_trampoline.write_trampoline(self.target_addr)
+            long_trampoline.write_trampoline(ret)
+            short_trampoline.write_trampoline(target_addr)
 
         #write changes to the log
         add_log_entry(entry, backup)
@@ -755,6 +750,7 @@ class PatchLibStrategy (PatchStrategy):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+        inferior = gdb.selected_inferior()
         #find target and patch functions
         try:
             target = "'" + self.target_func + "@plt'"
@@ -765,19 +761,13 @@ class PatchLibStrategy (PatchStrategy):
             self.dlclose(self.lib_handle)
 
         #fetch relative offset
-        target = target.cast(gdb.lookup_type("char").pointer())
-        target += 2
-        target = target.cast(gdb.lookup_type("int32_t").pointer())
-        relative_addr = target.dereference()
+        relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
 
         #fetch next instruction's address
-        target = target.cast(gdb.lookup_type("char").pointer())
-        next_instruction = target + 4
+        next_instruction = target_ptr + 6
 
         #calculate got.plt entry
-        addr_got = next_instruction.cast(gdb.lookup_type("char").pointer())
-        addr_got += relative_addr
-        self.addr_got = int(addr_got.cast(gdb.lookup_type("uint64_t")))
+        addr_got = next_instruction + relative_addr
         patch_arr = patch.to_bytes(8, byteorder = "little")
 
         #steal refcount
@@ -795,16 +785,13 @@ class PatchLibStrategy (PatchStrategy):
 
         tmp = find_first_patch(target_ptr)
         if tmp is None:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(self.addr_got, 8))
+            backup.membackup = bytearray(inferior.read_memory(addr_got, 8))
             entry.membackup_len = len(backup.membackup)
         else:
             entry.membackup_offset = tmp.membackup_offset
             entry.membackup_len = tmp.membackup_len
         add_log_entry(entry, backup)
 
-        inferior = gdb.selected_inferior()
-        #backup data
-        self.membackup = bytearray(inferior.read_memory(addr_got, 8))
         #write patch function address
         inferior.write_memory(addr_got, patch_arr, 8)
 
@@ -971,7 +958,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(entry.target_func_ptr, backup.membackup, len(backup.membackup))
             elif entry.patch_type == "L":
                 instruction = entry.target_func_ptr + 2
-                relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction, 4)), "little", signed=True)
+                relative_offset = int.from_bytes(inferior.read_memory(instruction, 4), "little", signed=True)
                 got_entry = entry.target_func_ptr + 6 + relative_offset
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
@@ -1058,7 +1045,7 @@ class ReapplyPatch(gdb.Command):
             if log_entry.membackup_len == ABSOLUTE_TRAMPOLINE_SIZE:
                 trampoline = AbsoluteTrampoline()
                 trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, "little")))
-                trampoline.write_trampoline_int(log_entry.target_func_ptr)
+                trampoline.write_trampoline(log_entry.target_func_ptr)
             else:
                 long_trampoline = AlignedAbsoluteTrampoline()
                 short_trampoline = RelativeTrampoline()
@@ -1066,7 +1053,7 @@ class ReapplyPatch(gdb.Command):
                 ret = alloc_trampoline(log_entry.target_func_ptr)
                 if ret == 0:
                     raise gdb.GdbError("Cannot allocate a trampoline.")
-                long_trampoline.write_trampoline_int(ret)
+                long_trampoline.write_trampoline(ret)
                 relative_offset = ret - log_entry.target_func_ptr - SHORT_TRAMPOLINE_SIZE
                 short_trampoline.complete_address(relative_offset)
                 short_trampoline.write_trampoline(log_entry.target_func_ptr)
