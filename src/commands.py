@@ -680,13 +680,17 @@ class PatchOwnStrategy (PatchStrategy):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
-        try:
-            target_addr = find_object(self.target_func)
-            target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
-        except:
-            #TODO
-            self.clean()
-            raise gdb.GdbError("Couldn't find target function symbol.")
+        match = re.match(HEX_REGEX, self.target_func)
+        if match:
+            target_addr = int(self.target_func, 16)
+        else:
+            try:
+                target_addr = find_object(self.target_func)
+                target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
+            except:
+                #TODO
+                self.clean()
+                raise gdb.GdbError("Couldn't find target function symbol.")
 
         #control flow must not be where the trampoline is about to be inserted
         #TODO control flow must not be in the function, it may lead to crash
