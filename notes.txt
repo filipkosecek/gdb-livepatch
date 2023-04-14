@@ -1,14 +1,9 @@
 -gdb nema tabulku symbolov pre libc (mozno je treba najst dlopen a dlclose ako samo)
 
--zistit ktore kniznice su otvorene a vypis, refcount, zmenit interface patchovacej funkcie (urobit novy patch alebo sa vratit uz k otvorenej s moznostou vratit sa na zaciatok bez patchu)
 -zistit ci sa control flow nachadza v target funkcii
 -najst dlopen poriadne
 -skusit zmenit postup aby cielovy proces nemusel otvorit kniznicu (keby nemal pristup k suborovemu systemu)
--odstranit bug s nazvom suboru
--opravit bug v nasobnom aplikovani patchov
--opravit trackovanie otvorenych kniznic
 
--implementovat zatvaranie kniznic (decrease_refcount())
 https://stackoverflow.com/questions/70177811/how-do-i-use-the-second-value-constructor-in-gdbs-python-api
 
 hlavny todo list:
@@ -16,7 +11,7 @@ hlavny todo list:
 -ktora trampolina sa pouzije
 -kedy sa ma patch vykonat (call stack)
 -skontrolovat kam sa zapisuje syscall/trampolina - ci to nie je na hranici stranky
--umoznit zadat hex adresu namiesto nazvu funkcie
+-*umoznit zadat hex adresu namiesto nazvu funkcie - hotovo, len pre kniznicne funkcie asi nie OK
 -mozne upravy: pridat dumpovanie logu do suboru, prepinace (napriklad uplne vypnut log)
 -vhodne vyriesit problemy s hladanim kniznicnych funkcii
--pokial treba prehladavat, aka rezerva, ked je blizko k jednej funkcii, nemusi byt k inej
+-najblizsia stranka -> pokial treba prehladavat, aka rezerva, ked je blizko k jednej funkcii, nemusi byt k inej

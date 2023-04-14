@@ -893,32 +893,6 @@ class Patch (gdb.Command):
                 self.strategy.do_patch(first_entry.path_offset, first_entry.path_len, -1, 0)
             counter += 1
 
-class PatchLog(gdb.Command):
-    def __init__(self):
-        super(PatchLog, self).__init__("patch-log", gdb.COMMAND_USER)
-
-    def invoke(self, arg, from_tty):
-        global master_lib_path
-        argv = gdb.string_to_argv(arg)
-        if len(argv) != 0:
-            raise gdb.GdbError("patch-log takes no parameters")
-
-        if not is_attached():
-            raise gdb.GdbError("No process attached.")
-
-        print("[0] revert")
-
-        find_master_lib()
-        if not master_lib_path:
-            print("Cannot find the log. No patch applied.")
-            return
-        header = read_header(master_lib_path)
-        log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
-        buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, header.log_entries_count*LOG_ENTRY_SIZE))
-        for i in range(header.log_entries_count):
-            entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
-            print("[" + str(i+1) + "]" + entry.to_string())
-
 #WARNING!!! sets found library as inactive
 #TODO poor design
 def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
@@ -1074,6 +1048,60 @@ class ReapplyPatch(gdb.Command):
         log_entry.is_active = True
         write_log_entry(log_entry, index)
 
+def log_to_string() -> str:
+    header = read_header(master_lib_path)
+    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, header.log_entries_count*LOG_ENTRY_SIZE))
+    result = "[0] revert"
+    for i in range(header.log_entries_count):
+        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+        result = "".join([result, "\n", "[", str(i+1), "]", entry.to_string()])
+    return result
+
+class PatchLog(gdb.Command):
+    def __init__(self):
+        super(PatchLog, self).__init__("patch-log", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        global master_lib_path
+        argv = gdb.string_to_argv(arg)
+        if len(argv) != 0:
+            raise gdb.GdbError("patch-log takes no parameters")
+
+        if not is_attached():
+            raise gdb.GdbError("No process attached.")
+
+        find_master_lib()
+        if not master_lib_path:
+            print("Couldn't find the log. No patch applied.")
+            return
+        print(log_to_string())
+
+class PatchLogDump(gdb.Command):
+    def __init__(self):
+        super(PatchLogDump, self).__init__("patch-dump", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        global master_lib_path
+        argv = gdb.string_to_argv(arg)
+
+        if not is_attached():
+            raise gdb.GdbError("No process attached.")
+
+        if len(argv) != 1:
+            raise gdb.GdbError("Provide a file name.")
+
+        find_master_lib()
+        if not master_lib_path:
+            raise gdb.GdbError("Couldn't find master library.")
+
+        #open file
+        file = open(argv[0], "w+")
+
+        file.write(log_to_string())
+        file.close()
+
 Patch()
 PatchLog()
 ReapplyPatch()
+PatchLogDump()
