@@ -8,16 +8,15 @@ type_list = ["uint64_t"]
 #x86_64 architecture specific
 PAGE_SIZE = 4096
 BYTE_ORDER = "little"
+NULL = 0
 
 #metadata structures sizes and names
 MAGIC_CONSTANT = 1024
-HEADER_SIZE = 32
+HEADER_SIZE = 48
 LOG_ENTRY_SIZE = 32
 LOG_SIZE = 2*4096
 PATCH_BACKUP_SIZE = PAGE_SIZE
 PATCH_HEADER_VAR_NAME = "patch_header"
-PATCH_LOG_VAR_NAME = "patch_log"
-PATCH_LOG_DATA_VAR_NAME = "patch_backup"
 PATCH_COMMANDS_VAR_NAME = "patch_commands"
 
 #syscall numbers
@@ -97,10 +96,12 @@ def addr_to_symbol(address: int) -> str:
     return result
 
 class struct_header:
-    def __init__(self, magic: int, libhandle: int, trampoline_page_ptr: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
+    def __init__(self, magic: int, libhandle: int, trampoline_page_ptr: int, log_page_ptr: int, patch_backup_page_ptr: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
         self.magic = magic
         self.libhandle = libhandle
         self.trampoline_page_ptr = trampoline_page_ptr
+        self.patch_backup_page_ptr = patch_backup_page_ptr
+        self.log_page_ptr = log_page_ptr
         self.refcount = refcount
         self.contains_log = contains_log
         #log entries count
@@ -113,6 +114,8 @@ class struct_header:
         print(self.magic)
         print(self.libhandle)
         print(self.trampoline_page_ptr)
+        print(self.log_page_ptr)
+        print(self.patch_backup_page_ptr)
         print(self.refcount)
         print(self.contains_log)
         print(self.log_entries_count)
@@ -135,18 +138,20 @@ def read_header(objfile_path: str) -> struct_header:
         return None
     libhandle = int.from_bytes(buffer[4:12], BYTE_ORDER)
     trampoline_page_ptr = int.from_bytes(buffer[12:20], BYTE_ORDER)
-    refcount = int.from_bytes(buffer[20:22], BYTE_ORDER)
-    contains_log = int.from_bytes(buffer[22:24], BYTE_ORDER)
+    log_page_ptr = int.from_bytes(buffer[20:28], BYTE_ORDER)
+    patch_backup_page_ptr = int.from_bytes(buffer[28:36], BYTE_ORDER)
+    refcount = int.from_bytes(buffer[36:38], BYTE_ORDER)
+    contains_log = int.from_bytes(buffer[38:40], BYTE_ORDER)
     if contains_log == 0:
         contains_log_bool = False
     elif contains_log == 1:
         contains_log_bool = True
     else:
         raise gdb.GdbError("Got wrong value for contains_log value.")
-    log_entries_count = int.from_bytes(buffer[24:26], BYTE_ORDER)
-    patch_data_array_len = int.from_bytes(buffer[26:28], BYTE_ORDER)
-    commands_len = int.from_bytes(buffer[28:32], BYTE_ORDER)
-    return struct_header(magic, libhandle, trampoline_page_ptr, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
+    log_entries_count = int.from_bytes(buffer[40:42], BYTE_ORDER)
+    patch_data_array_len = int.from_bytes(buffer[42:44], BYTE_ORDER)
+    commands_len = int.from_bytes(buffer[44:48], BYTE_ORDER)
+    return struct_header(magic, libhandle, trampoline_page_ptr, log_page_ptr, patch_backup_page_ptr, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
 
 def write_header(objfile_path: str, header: struct_header) -> None:
     if header.magic != MAGIC_CONSTANT:
@@ -158,6 +163,8 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     buffer.extend(header.magic.to_bytes(4, BYTE_ORDER))
     buffer.extend(header.libhandle.to_bytes(8, BYTE_ORDER))
     buffer.extend(header.trampoline_page_ptr.to_bytes(8, BYTE_ORDER))
+    buffer.extend(header.log_page_ptr.to_bytes(8, BYTE_ORDER))
+    buffer.extend(header.patch_backup_page_ptr.to_bytes(8, BYTE_ORDER))
     buffer.extend(header.refcount.to_bytes(2, BYTE_ORDER))
     if header.contains_log:
         tmp = 1
@@ -348,6 +355,20 @@ def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
         raise gdb.GdbError("Couldn't find symbol " + symbol_name)
     return symbol_address
 
+#TODO check if mmap return value
+def alloc_log_storage():
+    hdr = read_header(master_lib_path)
+    hdr.log_page_ptr = exec_mmap(NULL, LOG_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    hdr.patch_backup_page_ptr = exec_mmap(NULL, PATCH_BACKUP_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    write_header(master_lib_path, hdr)
+
+def free_log_storage():
+    hdr = read_header(master_lib_path)
+    if hdr.log_page_ptr != NULL:
+        exec_munmap(hdr.log_page_ptr, LOG_SIZE)
+    if hdr.patch_backup_page_ptr != NULL:
+        exec_munmap(hdr.patch_backup_page_ptr, PATCH_BACKUP_SIZE)
+
 class struct_log_entry:
     def __init__(self, target_func_ptr: int,
         patch_func_ptr: int,
@@ -372,10 +393,13 @@ class struct_log_entry:
 
     def to_string(self):
         global master_lib_path
-        master_lib = gdb.lookup_objfile(master_lib_path)
-        backup_ptr = find_object_dlsym(PATCH_LOG_DATA_VAR_NAME, master_lib_path)
-        backup_ptr += self.path_offset
-        path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
+        hdr = read_header(master_lib_path)
+        backup_ptr = hdr.patch_backup_page_ptr
+        if backup_ptr == 0:
+            path = ""
+        else:
+            backup_ptr += self.path_offset
+            path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
 
         target_func_str = addr_to_symbol(self.target_func_ptr)
         patch_func_str = addr_to_symbol(self.patch_func_ptr)
@@ -420,17 +444,11 @@ def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
 
 def read_log_entry(index: int) -> struct_log_entry:
     global master_lib_path
-    objfile = gdb.lookup_objfile(master_lib_path)
-    if objfile is None:
-        return None
     header = read_header(master_lib_path)
-    #TODO
-    if header.magic != MAGIC_CONSTANT or header.contains_log == False:
-        return None
-    if index*LOG_ENTRY_SIZE >= LOG_SIZE:
+    if index >= header.log_entries_count:
         return None
 
-    log_address = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    log_address = header.log_page_ptr
     log_address += index*LOG_ENTRY_SIZE
     inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
@@ -462,7 +480,8 @@ def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
 
 def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     global master_lib_path
-    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    header = read_header(master_lib_path)
+    log_ptr = header.log_page_ptr
     log_ptr += index*LOG_ENTRY_SIZE
 
     log_entry_buf = log_entry_to_bytearray(log_entry)
@@ -490,7 +509,10 @@ def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
     global master_lib_path
     path = None
     membackup = None
-    log_data_ptr = find_object_dlsym(PATCH_LOG_DATA_VAR_NAME, master_lib_path)
+    header = read_header(master_lib_path)
+    log_data_ptr = header.patch_backup_page_ptr
+    if log_data_ptr == NULL:
+        return None
     if log_entry.path_len != 0:
         path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
     if log_entry.membackup_len != 0:
@@ -500,8 +522,11 @@ def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
 def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
     global master_lib_path
     header = read_header(master_lib_path)
+    if header.log_page_ptr == NULL or header.patch_backup_page_ptr == NULL:
+        alloc_log_storage()
+    header = read_header(master_lib_path)
     index = header.log_entries_count
-    patch_backup_ptr = find_object_dlsym(PATCH_LOG_DATA_VAR_NAME, master_lib_path)
+    patch_backup_ptr = header.patch_backup_page_ptr
     log_size = header.log_entries_count*LOG_ENTRY_SIZE
     backup_size = header.patch_data_array_len
     patch_backup_ptr += backup_size
@@ -533,7 +558,7 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
     global master_lib_path
     hdr = read_header(master_lib_path)
     i = hdr.log_entries_count - 1
-    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    log_ptr = hdr.log_page_ptr
     buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
     result = None
     while i >= 0:
@@ -552,7 +577,7 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
 def find_first_patch(func_address: int) -> struct_log_entry:
     global master_lib_path
     hdr = read_header(master_lib_path)
-    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    log_ptr = hdr.log_page_ptr
     buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
     for i in range(hdr.log_entries_count):
         entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
@@ -562,24 +587,20 @@ def find_first_patch(func_address: int) -> struct_log_entry:
 
 def copy_log(dest: str, src: str):
     global master_lib_path
-    src_log = find_object_dlsym(PATCH_LOG_VAR_NAME, src)
-    src_backup = find_object_dlsym(PATCH_LOG_DATA_VAR_NAME, src)
-    dest_log = find_object_dlsym(PATCH_LOG_VAR_NAME, dest)
-    dest_backup = find_object_dlsym(PATCH_LOG_DATA_VAR_NAME, dest)
     src_hdr = read_header(src)
-    src_hdr.contains_log = False
-    write_header(src, src_hdr)
     dest_hdr = read_header(dest)
     dest_hdr.contains_log = True
     dest_hdr.log_entries_count = src_hdr.log_entries_count
     dest_hdr.patch_data_array_len = src_hdr.patch_data_array_len
     dest_hdr.trampoline_page_ptr = src_hdr.trampoline_page_ptr
+    dest_hdr.log_page_ptr = src_hdr.log_page_ptr
+    dest_hdr.patch_backup_page_ptr = src_hdr.patch_backup_page_ptr
     write_header(dest, dest_hdr)
-    inferior = gdb.selected_inferior()
-    log_buffer = bytearray(inferior.read_memory(src_log, src_hdr.log_entries_count*LOG_ENTRY_SIZE))
-    backup_buffer = bytearray(inferior.read_memory(src_backup, src_hdr.patch_data_array_len))
-    inferior.write_memory(dest_log, log_buffer, len(log_buffer))
-    inferior.write_memory(dest_backup, backup_buffer, len(backup_buffer))
+    src_hdr.contains_log = False
+    src_hdr.trampoline_page_ptr = NULL
+    src_hdr.log_page_ptr = NULL
+    src_hdr.log_page_ptr = NULL
+    write_header(src, src_hdr)
     master_lib_path = dest
 
 def close_lib(lib: str):
@@ -600,9 +621,11 @@ def close_lib(lib: str):
             if header.magic == MAGIC_CONSTANT and objfile.filename != lib:
                 copy_log(objfile.filename, lib)
                 is_last = False
+                break
     if is_last:
         if hdr.trampoline_page_ptr != 0:
             free_trampoline_page(hdr.trampoline_page_ptr)
+            free_log_storage()
         master_lib_path = ""
     dlclose = find_object("dlclose")
     dlclose(hdr.libhandle)
@@ -618,7 +641,6 @@ def steal_refcount(func_address: int, current_lib: str):
     lib = find_last_patch_and_set_as_inactive(func_address)
     if lib is not None:
         pass
-        #TODO use decrease_refcount instead
         decrease_refcount(lib)
 
     current = read_header(current_lib)
@@ -909,8 +931,9 @@ class Patch (gdb.Command):
 #TODO poor design
 def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
     global master_lib_path
-    size = read_header(master_lib_path).log_entries_count
-    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    hdr = read_header(master_lib_path)
+    size = hdr.log_entries_count
+    log_ptr = hdr.log_page_ptr
     buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, size*LOG_ENTRY_SIZE))
     result = None
     for i in range(size):
@@ -930,7 +953,7 @@ class ReapplyPatch(gdb.Command):
 
     def revert_all(self):
         header = read_header(master_lib_path)
-        patch_log = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+        patch_log = header.log_page_ptr
         inferior = gdb.selected_inferior()
         buffer = bytearray(gdb.selected_inferior().read_memory(patch_log, header.log_entries_count*LOG_ENTRY_SIZE))
         for i in range(header.log_entries_count):
@@ -1062,7 +1085,7 @@ class ReapplyPatch(gdb.Command):
 
 def log_to_string() -> str:
     header = read_header(master_lib_path)
-    log_ptr = find_object_dlsym(PATCH_LOG_VAR_NAME, master_lib_path)
+    log_ptr = header.log_page_ptr
     buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, header.log_entries_count*LOG_ENTRY_SIZE))
     result = "[0] revert"
     for i in range(header.log_entries_count):

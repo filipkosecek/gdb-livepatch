@@ -8,8 +8,7 @@
 
 /* size constants */
 #define PAGE_SIZE 4096
-#define HEADER_SIZE 32
-#define LOG_SIZE 2*(PAGE_SIZE)
+#define HEADER_SIZE 48
 #define MAGIC_CONST 1024
 
 /* variable attributes*/
@@ -25,8 +24,6 @@
 PATCH_SECTION char patch_commands[] = __X; \
 \
 PATCH_SECTION static char patch_header[HEADER_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
-PATCH_SECTION char patch_log[LOG_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
-PATCH_SECTION char patch_backup[PAGE_SIZE] __attribute__((section(PATCH_SECTION_NAME))) = {0}; \
 CONSTRUCTOR void init(void); \
 \
 void init(void){ \
