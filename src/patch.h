@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define PATCH_SECTION_NAME ".patch"
+#define PATCH_SECTION_NAME "gdbpatch"
 
 /* size constants */
 #define PAGE_SIZE 4096

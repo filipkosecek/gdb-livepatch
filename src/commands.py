@@ -308,8 +308,10 @@ def alloc_trampoline(target_function_address: int) -> int:
         page_base = find_nearest_free_page(target_function_address)
         if page_base == 0:
             return 0
-        alloc_trampoline_page(page_base)
-        hdr.trampoline_page_ptr = page_base
+        ret = alloc_trampoline_page(page_base)
+        if ret == 0:
+            return 0
+        hdr.trampoline_page_ptr = ret
         write_header(master_lib_path, hdr)
     index = find_first_free_trampoline_index(hdr.trampoline_page_ptr)
     if index == -1:
@@ -320,7 +322,7 @@ def free_trampoline(trampoline_address: int):
     hdr = read_header(master_lib_path)
     if hdr.trampoline_page_ptr == 0:
         return
-    index = int((trampoline_address - hdr.trampoline_page_ptr - TRAMPOLINE_BITMAP_SIZE) / 16)
+    index = int((trampoline_address - hdr.trampoline_page_ptr - TRAMPOLINE_BITMAP_SIZE) / PADDED_TRAMPOLINE_SIZE)
     word_index = int(index / 8)
     bit_index = index % 8
     inferior = gdb.selected_inferior()
