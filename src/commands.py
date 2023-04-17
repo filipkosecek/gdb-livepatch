@@ -600,6 +600,7 @@ def close_lib(lib: str):
             if header.magic == MAGIC_CONSTANT and objfile.filename != lib:
                 copy_log(objfile.filename, lib)
                 is_last = False
+                break
     if is_last:
         if hdr.trampoline_page_ptr != 0:
             free_trampoline_page(hdr.trampoline_page_ptr)
