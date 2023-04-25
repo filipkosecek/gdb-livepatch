@@ -7,6 +7,7 @@ type_list = ["uint64_t"]
 
 #x86_64 architecture specific
 PAGE_SIZE = 4096
+PAGE_MASK = 0xfffffffffffff000
 BYTE_ORDER = "little"
 NULL = 0
 
@@ -246,6 +247,9 @@ def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int
     inferior = gdb.selected_inferior()
     registers = save_registers()
     rip = registers["rip"]
+    #align rip at the beginning of the page
+    rip &= PAGE_MASK
+    gdb.execute("set $rip = " + str(rip))
     syscall_instruction = bytearray.fromhex("0f 05")
     membackup = bytearray(inferior.read_memory(rip, 2))
     inferior.write_memory(rip, syscall_instruction, 2)
@@ -487,6 +491,27 @@ def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     log_entry_buf = log_entry_to_bytearray(log_entry)
     gdb.selected_inferior().write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
+def log_to_entry_array() -> list[struct_log_entry]:
+    hdr = read_header(master_lib_path)
+    result = list()
+    if hdr.log_page_ptr == NULL:
+        return result
+    inferior = gdb.selected_inferior()
+    buffer = bytearray(inferior.read_memory(hdr.log_page_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
+    for i in range(hdr.log_entries_count):
+        result.append(bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)]))
+    return result
+
+def entry_array_to_log(entries: list[struct_log_entry]):
+    hdr = read_header(master_lib_path)
+    if hdr.log_page_ptr == NULL:
+        return
+    buffer = bytearray()
+    for entry in entries:
+        buffer.extend(log_entry_to_bytearray(entry))
+    inferior = gdb.selected_inferior()
+    inferior.write_memory(hdr.log_page_ptr, buffer, len(buffer))
+
 def get_last_log_entry() -> struct_log_entry:
     global master_lib_path
     hdr = read_header(master_lib_path)
@@ -556,13 +581,10 @@ def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup
 #TODO also sets log is_active flag
 def find_last_patch_and_set_as_inactive(func_address: int) -> str:
     global master_lib_path
-    hdr = read_header(master_lib_path)
-    i = hdr.log_entries_count - 1
-    log_ptr = hdr.log_page_ptr
-    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
+    entries = log_to_entry_array()
     result = None
-    while i >= 0:
-        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+    i = len(entries) - 1
+    for entry in entries:
         if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(entry).path
             instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
@@ -576,11 +598,8 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
 
 def find_first_patch(func_address: int) -> struct_log_entry:
     global master_lib_path
-    hdr = read_header(master_lib_path)
-    log_ptr = hdr.log_page_ptr
-    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
-    for i in range(hdr.log_entries_count):
-        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+    entries = log_to_entry_array()
+    for entry in entries:
         if entry.target_func_ptr == func_address:
             return entry
     return None
@@ -625,6 +644,7 @@ def close_lib(lib: str):
     if is_last:
         if hdr.trampoline_page_ptr != 0:
             free_trampoline_page(hdr.trampoline_page_ptr)
+        if hdr.log_page_ptr != NULL or hdr.patch_backup_page_ptr != NULL:
             free_log_storage()
         master_lib_path = ""
     dlclose = find_object("dlclose")
@@ -931,13 +951,10 @@ class Patch (gdb.Command):
 #TODO poor design
 def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
     global master_lib_path
-    hdr = read_header(master_lib_path)
-    size = hdr.log_entries_count
-    log_ptr = hdr.log_page_ptr
-    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, size*LOG_ENTRY_SIZE))
+    entries = log_to_entry_array()
     result = None
-    for i in range(size):
-        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+    i = len(entries) - 1
+    for entry in entries:
         if entry.target_func_ptr == func_address and entry.is_active:
             instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
             if instruction_prefix[0] == 0xe9:
@@ -945,6 +962,7 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
             entry.is_active = False
             write_log_entry(entry, i)
             return entry
+        i -= 1
     return None
 
 class ReapplyPatch(gdb.Command):
@@ -952,12 +970,9 @@ class ReapplyPatch(gdb.Command):
         super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
 
     def revert_all(self):
-        header = read_header(master_lib_path)
-        patch_log = header.log_page_ptr
+        entries = log_to_entry_array()
         inferior = gdb.selected_inferior()
-        buffer = bytearray(gdb.selected_inferior().read_memory(patch_log, header.log_entries_count*LOG_ENTRY_SIZE))
-        for i in range(header.log_entries_count):
-            entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
+        for entry in entries:
             if not entry.is_active:
                 continue
             backup = read_log_entry_data(entry)
@@ -1084,13 +1099,12 @@ class ReapplyPatch(gdb.Command):
         write_log_entry(log_entry, index)
 
 def log_to_string() -> str:
-    header = read_header(master_lib_path)
-    log_ptr = header.log_page_ptr
-    buffer = bytearray(gdb.selected_inferior().read_memory(log_ptr, header.log_entries_count*LOG_ENTRY_SIZE))
+    entries = log_to_entry_array()
     result = "[0] revert"
-    for i in range(header.log_entries_count):
-        entry = bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)])
-        result = "".join([result, "\n", "[", str(i+1), "]", entry.to_string()])
+    i = 1
+    for entry in entries:
+        result = "".join([result, "\n", "[", str(i), "]", entry.to_string()])
+        i += 1
     return result
 
 class PatchLog(gdb.Command):
