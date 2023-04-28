@@ -16,8 +16,9 @@
 #define CONSTRUCTOR __attribute__((constructor))
 
 /* patch strategy commands */
-#define PATCH_OWN(orig, replace) "O:" #orig ":" #replace ";"
-#define PATCH_LIB(orig, replace) "L:" #orig ":" #replace ";"
+#define PATCH_OWN_LONG(orig, replace) "O:L:" #orig ":" #replace ";"
+#define PATCH_OWN_SHORT(orig, replace) "O:S:" #orig ":" #replace ";"
+#define PATCH_LIB(orig, replace) "L:N:" #orig ":" #replace ";"
 
 /* patch metadata variables */
 #define PATCH(__X) \

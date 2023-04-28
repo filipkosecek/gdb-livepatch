@@ -2,6 +2,7 @@ import gdb
 import time
 import re
 from datetime import datetime
+from enum import Enum
 
 type_list = ["uint64_t"]
 
@@ -45,6 +46,11 @@ PADDED_TRAMPOLINE_SIZE = 16
 SHORT_TRAMPOLINE_SIZE = 5
 
 MAX_PAGE_DIST = pow(2, 25)
+
+class TrampolineType(Enum):
+    LONG_TRAMPOLINE = 0
+    SHORT_TRAMPOLINE = 1
+
 
 master_lib_path = ""
 
@@ -584,7 +590,8 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
     entries = log_to_entry_array()
     result = None
     i = len(entries) - 1
-    for entry in entries:
+    while i >= 0:
+        entry = entries[i]
         if entry.is_active and entry.target_func_ptr == func_address:
             result = read_log_entry_data(entry).path
             instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
@@ -730,8 +737,9 @@ class PatchStrategy:
         pass
 
 class PatchOwnStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str):
+    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str, trampoline_type: TrampolineType):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
+        self.trampoline_type = trampoline_type
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
         match = re.match(HEX_REGEX, self.target_func)
@@ -762,7 +770,6 @@ class PatchOwnStrategy (PatchStrategy):
 
         #steal refcount
         steal_refcount(target_addr, self.path)
-
         #write to log
         entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
         backup = struct_patch_backup(None, None)
@@ -782,7 +789,12 @@ class PatchOwnStrategy (PatchStrategy):
             entry.membackup_len = tmp.membackup_len
 
         #write trampoline
-        ret = alloc_trampoline(target_addr)
+        if self.trampoline_type == TrampolineType.LONG_TRAMPOLINE:
+            ret = 0
+        elif self.trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
+            ret = alloc_trampoline(target_addr)
+        else:
+            raise gdb.GdbError("Got wrong type of trampoline.")
         inferior = gdb.selected_inferior()
         if ret == 0:
             trampoline = AbsoluteTrampoline()
@@ -864,6 +876,15 @@ class Patch (gdb.Command):
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
+    def check_patch_metadata(self, instructions: list[list[str]]) -> bool:
+        for instruction in instructions:
+            if instruction[0] != 'O' and instruction[0] != 'L':
+                return False
+            if instruction[1] != 'L' and instruction[1] != 'S' and instruction[1] != 'N':
+                print(False)
+                return False
+        return True
+
     def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
         header = read_header(objfile)
         if header is None:
@@ -922,6 +943,9 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
+        if not self.check_patch_metadata(metadata):
+            #TODO close the library
+            return
         if not master_lib_path:
             master_lib_path = argv[0]
         tmp = read_header(master_lib_path)
@@ -929,16 +953,19 @@ class Patch (gdb.Command):
         write_header(master_lib_path, tmp)
         counter = 0
 
+        #TODO check all metadata before applying patch
         for patch in metadata:
-            target_func = patch[1]
-            patch_func = patch[2]
+            target_func = patch[2]
+            patch_func = patch[3]
+            if patch[1] == "L":
+                trampoline_type = TrampolineType.LONG_TRAMPOLINE
+            elif patch[1] == "S":
+                trampoline_type = TrampolineType.SHORT_TRAMPOLINE
 
             if patch[0] == 'O':
-                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
+                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func, trampoline_type)
             elif patch[0] == 'L':
                 self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
-            else:
-                raise gdb.GdbError("Patching own and library functions is only supported for now.")
 
             if counter == 0:
                 self.strategy.do_patch(-1, 0, -1, 0)
@@ -953,8 +980,9 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
     global master_lib_path
     entries = log_to_entry_array()
     result = None
-    i = len(entries) - 1
-    for entry in entries:
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
         if entry.target_func_ptr == func_address and entry.is_active:
             instruction_prefix = bytearray(gdb.selected_inferior().read_memory(entry.target_func_ptr, 1))
             if instruction_prefix[0] == 0xe9:
@@ -962,7 +990,7 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
             entry.is_active = False
             write_log_entry(entry, i)
             return entry
-        i -= 1
+        i += 1
     return None
 
 class ReapplyPatch(gdb.Command):
