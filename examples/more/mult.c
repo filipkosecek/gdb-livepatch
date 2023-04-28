@@ -6,5 +6,5 @@ void mult(uint64_t *x){
 }
 
 PATCH(
-	PATCH_OWN(target_function, mult)
+	PATCH_OWN_SHORT(target_function, mult)
 )

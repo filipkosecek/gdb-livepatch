@@ -7,5 +7,5 @@ void pretty_printer(uint64_t x){
 }
 
 PATCH(
-	PATCH_OWN(print_value, pretty_printer)
+	PATCH_OWN_SHORT(print_value, pretty_printer)
 )

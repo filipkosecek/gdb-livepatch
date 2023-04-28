@@ -6,5 +6,5 @@ void patch_function(uint64_t *x){
 }
 
 PATCH(
-	PATCH_OWN(target_function, patch_function)
+	PATCH_OWN_SHORT(target_function, patch_function)
 )
