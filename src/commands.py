@@ -288,9 +288,12 @@ def exec_munmap(address: int, size: int) -> int:
 def exec_mprotect(address: int, size: int, prot: int) -> int:
     return exec_syscall(SYS_MPROTECT, address, size, prot, 0, 0, 0)
 
-def alloc_trampoline_page(address: int) -> int:
-    ptr = exec_mmap(address, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+def alloc_trampoline_page(page_base: int, target_function_ptr: int) -> int:
+    ptr = exec_mmap(page_base, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if ptr == -1:
+        return 0
+    if abs(ptr - target_function_ptr) > (pow(2,31) - 1):
+        exec_munmap(ptr, PAGE_SIZE)
         return 0
     init_trampoline_bitmap(ptr)
     return ptr
@@ -329,7 +332,7 @@ def alloc_trampoline(target_function_address: int) -> int:
         page_base = find_nearest_free_page(target_function_address)
         if page_base == 0:
             return 0
-        ret = alloc_trampoline_page(page_base)
+        ret = alloc_trampoline_page(page_base, target_function_address)
         if ret == 0:
             return 0
         hdr.trampoline_page_ptr = ret
@@ -1006,7 +1009,8 @@ class ReapplyPatch(gdb.Command):
 
     def revert_all(self):
         entries = log_to_entry_array()
-        for entry in entries:
+        for i in range(len(entries)):
+            entry = entries[i]
             if not entry.is_active:
                 continue
             entry.is_active = False
@@ -1025,8 +1029,8 @@ class ReapplyPatch(gdb.Command):
                 got_entry = entry.target_func_ptr + 6 + relative_offset
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
+            write_log_entry(entry, i)
             decrease_refcount(backup.path)
-        entry_array_to_log(entries)
 
     def revert(self, argv: list[str]):
         if len(argv) == 1:
