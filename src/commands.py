@@ -47,18 +47,19 @@ SHORT_TRAMPOLINE_SIZE = 5
 
 MAX_PAGE_DIST = pow(2, 25)
 
+#global variables
+master_lib_path = ""
+inferior = None
+dlopen = NULL
+dlsym = NULL
+dlclose = NULL
+
 class TrampolineType(Enum):
     LONG_TRAMPOLINE = 0
     SHORT_TRAMPOLINE = 1
 
-
-master_lib_path = ""
-
 def is_attached() -> bool:
-    inferior = gdb.selected_inferior()
-    if inferior.was_attached:
-        return True
-    return False
+    return gdb.selected_inferior().pid != 0
 
 def c_string(s: str) -> gdb.Value:
     tmp = s + '\0'
@@ -90,6 +91,15 @@ def find_object_static(symbol_name: str, objfile_name: str) -> int:
         raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
     else:
         return symbol
+
+def init_global_vars():
+    global inferior, dlopen, dlsym, dlclose
+    if not is_attached():
+        raise gdb.GdbError("No process attached.")
+    inferior = gdb.selected_inferior()
+    dlopen = find_object("dlopen")
+    dlsym = find_object("dlsym")
+    dlclose = find_object("dlclose")
 
 def addr_to_symbol(address: int) -> str:
     cmd = gdb.execute("info symbol " + str(address), to_string=True)
@@ -130,7 +140,6 @@ class struct_header:
         print(self.commands_len)
 
 def read_header(objfile_path: str) -> struct_header:
-    inferior = gdb.selected_inferior()
     patchlib = gdb.lookup_objfile(objfile_path)
     if patchlib is None:
         return None
@@ -182,7 +191,6 @@ def write_header(objfile_path: str, header: struct_header) -> None:
     buffer.extend(header.patch_data_array_len.to_bytes(2, BYTE_ORDER))
     buffer.extend(header.commands_len.to_bytes(4, BYTE_ORDER))
 
-    inferior = gdb.selected_inferior()
     inferior.write_memory(header_addr, buffer, len(buffer))
 
 def find_mappings() -> tuple[set[int], dict[int, int]]:
@@ -219,7 +227,6 @@ def find_nearest_free_page(address: int) -> int:
     return 0
 
 def init_trampoline_bitmap(address: int):
-    inferior = gdb.selected_inferior()
     inferior.write_memory(address, bytearray(TRAMPOLINE_BITMAP_SIZE), TRAMPOLINE_BITMAP_SIZE)
 
 def save_registers() -> dict[str, int]:
@@ -250,7 +257,6 @@ def restore_registers(registers: dict[str, int]):
 def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int) -> int:
     if syscall_number < 0 or syscall_number > 332:
         raise gdb.GdbError("No such system call.")
-    inferior = gdb.selected_inferior()
     registers = save_registers()
     rip = registers["rip"]
     #align rip at the beginning of the page
@@ -297,7 +303,6 @@ def free_trampoline_page(address: int):
         raise gdb.GdbError("Couldn't unmap the page.")
 
 def get_trampoline_count(bitmap_address: int) -> int:
-    inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
     counter = 0
     for word_index in range(TRAMPOLINE_BITMAP_SIZE):
@@ -307,7 +312,6 @@ def get_trampoline_count(bitmap_address: int) -> int:
     return counter
 
 def find_first_free_trampoline_index(bitmap_address: int) -> int:
-    inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
     for word_index in range(TRAMPOLINE_ARRAY_SIZE):
         word = buffer[word_index]
@@ -347,25 +351,21 @@ def free_trampoline(trampoline_address: int):
     index = int((trampoline_address - hdr.trampoline_page_ptr - TRAMPOLINE_BITMAP_SIZE) / PADDED_TRAMPOLINE_SIZE)
     word_index = int(index / 8)
     bit_index = index % 8
-    inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(hdr.trampoline_page_ptr, TRAMPOLINE_BITMAP_SIZE))
     #reset bit
     buffer[word_index] &= (~(1 << bit_index))
     inferior.write_memory(hdr.trampoline_page_ptr, buffer, len(buffer))
 
 def free_trampoline_from_instruction(instruction_ptr: int):
-    inferior = gdb.selected_inferior()
     instruction_ptr += 1
     relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, SHORT_TRAMPOLINE_SIZE - 1)), BYTE_ORDER, signed=True)
     free_trampoline(instruction_ptr + SHORT_TRAMPOLINE_SIZE + relative_offset)
 
 def get_instruction_prefix(addr: int) -> int:
-    inferior = gdb.selected_inferior()
     tmp = bytearray(inferior.read_memory(addr, 1))
     return tmp[0]
 
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
-    dlsym = find_object("dlsym")
     hdr = read_header(objfile_name)
     if hdr is None:
         return 0
@@ -419,7 +419,7 @@ class struct_log_entry:
             path = ""
         else:
             backup_ptr += self.path_offset
-            path = bytearray(gdb.selected_inferior().read_memory(backup_ptr, self.path_len)).decode("ascii")
+            path = bytearray(inferior.read_memory(backup_ptr, self.path_len)).decode("ascii")
 
         target_func_str = addr_to_symbol(self.target_func_ptr)
         patch_func_str = addr_to_symbol(self.patch_func_ptr)
@@ -470,7 +470,6 @@ def read_log_entry(index: int) -> struct_log_entry:
 
     log_address = header.log_page_ptr
     log_address += index*LOG_ENTRY_SIZE
-    inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
     return bytearray_to_log_entry(buffer)
 
@@ -505,14 +504,13 @@ def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     log_ptr += index*LOG_ENTRY_SIZE
 
     log_entry_buf = log_entry_to_bytearray(log_entry)
-    gdb.selected_inferior().write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
+    inferior.write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
 def log_to_entry_array() -> list[struct_log_entry]:
     hdr = read_header(master_lib_path)
     result = list()
     if hdr.log_page_ptr == NULL:
         return result
-    inferior = gdb.selected_inferior()
     buffer = bytearray(inferior.read_memory(hdr.log_page_ptr, hdr.log_entries_count*LOG_ENTRY_SIZE))
     for i in range(hdr.log_entries_count):
         result.append(bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)]))
@@ -525,7 +523,6 @@ def entry_array_to_log(entries: list[struct_log_entry]):
     buffer = bytearray()
     for entry in entries:
         buffer.extend(log_entry_to_bytearray(entry))
-    inferior = gdb.selected_inferior()
     inferior.write_memory(hdr.log_page_ptr, buffer, len(buffer))
 
 def get_last_log_entry() -> struct_log_entry:
@@ -557,9 +554,9 @@ def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
     if log_data_ptr == NULL:
         return None
     if log_entry.path_len != 0:
-        path = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
+        path = bytearray(inferior.read_memory(log_data_ptr + log_entry.path_offset, log_entry.path_len)).decode("ascii")
     if log_entry.membackup_len != 0:
-        membackup = bytearray(gdb.selected_inferior().read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
+        membackup = bytearray(inferior.read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
     return struct_patch_backup(path, membackup)
 
 def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
@@ -582,7 +579,6 @@ def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup
     header.patch_data_array_len += patch_backup.size()
     write_header(master_lib_path, header)
 
-    inferior = gdb.selected_inferior()
     if patch_backup.path is not None:
         backup_buf = bytearray(patch_backup.path.encode())
         inferior.write_memory(patch_backup_ptr, backup_buf, len(backup_buf))
@@ -666,7 +662,6 @@ def close_lib(lib: str):
         if hdr.log_page_ptr != NULL or hdr.patch_backup_page_ptr != NULL:
             free_log_storage()
         master_lib_path = ""
-    dlclose = find_object("dlclose")
     dlclose(hdr.libhandle)
 
 def decrease_refcount(lib: str):
@@ -711,7 +706,6 @@ class AbsoluteTrampoline:
             self.trampoline[i+2] = addr[i]
 
     def write_trampoline(self, address: int):
-        inferior = gdb.selected_inferior()
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
 class AlignedAbsoluteTrampoline(AbsoluteTrampoline):
@@ -731,13 +725,11 @@ class RelativeTrampoline:
             self.trampoline[i+1] = offset[i]
 
     def write_trampoline(self, address: int):
-        inferior = gdb.selected_inferior()
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
 class PatchStrategy:
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
+    def __init__(self, lib_handle: gdb.Value, path: str, target_func: str, patch_func: str):
         self.lib_handle = lib_handle
-        self.dlclose = dlclose
         self.path = path
         self.target_func = target_func
         self.patch_func = patch_func
@@ -749,8 +741,8 @@ class PatchStrategy:
         pass
 
 class PatchOwnStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str,  target_func: str, patch_func: str, trampoline_type: TrampolineType):
-        super().__init__(lib_handle, dlclose, path, target_func, patch_func)
+    def __init__(self, lib_handle: gdb.Value, path: str,  target_func: str, patch_func: str, trampoline_type: TrampolineType):
+        super().__init__(lib_handle, path, target_func, patch_func)
         self.trampoline_type = trampoline_type
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
@@ -795,7 +787,7 @@ class PatchOwnStrategy (PatchStrategy):
 
             tmp = find_first_patch(target_addr)
             if tmp is None:
-                backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
+                backup.membackup = bytearray(inferior.read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
                 entry.membackup_len = len(backup.membackup)
             else:
                 entry.membackup_offset = tmp.membackup_offset
@@ -826,14 +818,13 @@ class PatchOwnStrategy (PatchStrategy):
             add_log_entry(entry, backup)
 
     def clean(self):
-        self.dlclose(self.lib_handle)
+        dlclose(self.lib_handle)
 
 class PatchLibStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
-        super().__init__(lib_handle, dlclose, path, target_func, patch_func)
+    def __init__(self, lib_handle: gdb.Value, path: str, target_func: str, patch_func: str):
+        super().__init__(lib_handle, path, target_func, patch_func)
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        inferior = gdb.selected_inferior()
         #find target and patch functions
         try:
             target = "'" + self.target_func + "@plt'"
@@ -841,7 +832,7 @@ class PatchLibStrategy (PatchStrategy):
             target_ptr = int(target.cast(gdb.lookup_type("uint64_t")))
             patch = find_object_dlsym(self.patch_func, self.path)
         except:
-            self.dlclose(self.lib_handle)
+            dlclose(self.lib_handle)
 
         #fetch relative offset
         relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
@@ -907,7 +898,6 @@ class Patch (gdb.Command):
         commands_len = header.commands_len
         commands = find_object_dlsym(PATCH_COMMANDS_VAR_NAME, objfile)
 
-        inferior = gdb.selected_inferior()
         items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")
         result = []
         for item in items:
@@ -927,7 +917,7 @@ class Patch (gdb.Command):
  
     #TODO check -> magic const must be equal to the one defined in C header
     def load_patch_lib(self, path: str):
-        self.dlopen_ret = self.dlopen_addr(c_string(path), 2)
+        self.dlopen_ret = dlopen(c_string(path), 2)
         if self.dlopen_ret == 0:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
@@ -946,9 +936,6 @@ class Patch (gdb.Command):
         if len(argv) != 1 and len(argv) != 2:
             raise gdb.GdbError("patch takes one or two parameter")
 
-        if not is_attached():
-            raise gdb.GdbError("No process attached.")
-
         mark_log_entry = False
         if len(argv) == 2:
             if argv[1] != "--log":
@@ -956,8 +943,7 @@ class Patch (gdb.Command):
             mark_log_entry = True
 
         #find necessary objects
-        self.dlopen_addr = find_object("dlopen")
-        self.dlclose_addr = find_object("dlclose")
+        init_global_vars()
         self.is_patchable()
         find_master_lib()
 
@@ -984,9 +970,9 @@ class Patch (gdb.Command):
                 trampoline_type = TrampolineType.SHORT_TRAMPOLINE
 
             if patch[0] == 'O':
-                self.strategy = PatchOwnStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func, trampoline_type)
+                self.strategy = PatchOwnStrategy(self.dlopen_ret, argv[0], target_func, patch_func, trampoline_type)
             elif patch[0] == 'L':
-                self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
+                self.strategy = PatchLibStrategy(self.dlopen_ret, argv[0], target_func, patch_func)
 
             if counter == 0 or first_entry is None:
                 self.strategy.do_patch(-1, 0, -1, 0, mark_log_entry)
@@ -1020,7 +1006,6 @@ class ReapplyPatch(gdb.Command):
 
     def revert_all(self):
         entries = log_to_entry_array()
-        inferior = gdb.selected_inferior()
         for entry in entries:
             if not entry.is_active:
                 continue
@@ -1068,7 +1053,6 @@ class ReapplyPatch(gdb.Command):
             backup = read_log_entry_data(entry)
             path = backup.path
             membackup = backup.membackup
-            inferior = gdb.selected_inferior()
             if path is None or membackup is None:
                 raise gdb.GdbError("Fatal error, couldn't find membackup.")
             if entry.patch_type == "O":
@@ -1090,8 +1074,8 @@ class ReapplyPatch(gdb.Command):
         argv = gdb.string_to_argv(arg)
         if len(arg) < 1:
            raise gdb.GdbError("patch-reapply takes one parameter")
-        if not is_attached():
-            raise gdb.GdbError("No process attached.")
+
+        init_global_vars()
         find_master_lib()
         if not master_lib_path:
             raise gdb.GdbError("Couldn't find the log, master library is not present.")
@@ -1139,7 +1123,6 @@ class ReapplyPatch(gdb.Command):
 
         elif log_entry.patch_type == "L":
             instruction_ptr = log_entry.target_func_ptr + 2
-            inferior = gdb.selected_inferior()
             relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), BYTE_ORDER, signed=True)
             instruction_ptr += 4
             got_entry = instruction_ptr + relative_offset
@@ -1167,9 +1150,7 @@ class PatchLog(gdb.Command):
         if len(argv) != 0:
             raise gdb.GdbError("patch-log takes no parameters")
 
-        if not is_attached():
-            raise gdb.GdbError("No process attached.")
-
+        init_global_vars()
         find_master_lib()
         if not master_lib_path:
             print("Couldn't find the log. No patch applied.")
@@ -1184,9 +1165,7 @@ class PatchLogDump(gdb.Command):
         global master_lib_path
         argv = gdb.string_to_argv(arg)
 
-        if not is_attached():
-            raise gdb.GdbError("No process attached.")
-
+        init_global_vars()
         if len(argv) != 1:
             raise gdb.GdbError("Provide a file name.")
 
