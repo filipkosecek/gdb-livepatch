@@ -531,6 +531,8 @@ def entry_array_to_log(entries: list[struct_log_entry]):
 def get_last_log_entry() -> struct_log_entry:
     global master_lib_path
     hdr = read_header(master_lib_path)
+    if hdr.log_entries_count <= 0:
+        return None
     return read_log_entry(hdr.log_entries_count - 1)
 
 class struct_patch_backup:
@@ -740,7 +742,7 @@ class PatchStrategy:
         self.target_func = target_func
         self.patch_func = patch_func
 
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
         pass
     
     def clean(self):
@@ -751,7 +753,7 @@ class PatchOwnStrategy (PatchStrategy):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
         self.trampoline_type = trampoline_type
 
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
         match = re.match(HEX_REGEX, self.target_func)
         if match:
             target_addr = int(self.target_func, 16)
@@ -781,22 +783,23 @@ class PatchOwnStrategy (PatchStrategy):
         #steal refcount
         steal_refcount(target_addr, self.path)
         #write to log
-        entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
-        backup = struct_patch_backup(None, None)
-        if path_offset != -1:
-            entry.path_offset = path_offset
-            entry.path_len = path_len
-        else:
-            backup.path = self.path
-            entry.path_len = len(self.path)
+        if mark_log_entry:
+            entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
+            backup = struct_patch_backup(None, None)
+            if path_offset != -1:
+                entry.path_offset = path_offset
+                entry.path_len = path_len
+            else:
+                backup.path = self.path
+                entry.path_len = len(self.path)
 
-        tmp = find_first_patch(target_addr)
-        if tmp is None:
-            backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
-            entry.membackup_len = len(backup.membackup)
-        else:
-            entry.membackup_offset = tmp.membackup_offset
-            entry.membackup_len = tmp.membackup_len
+            tmp = find_first_patch(target_addr)
+            if tmp is None:
+                backup.membackup = bytearray(gdb.selected_inferior().read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
+                entry.membackup_len = len(backup.membackup)
+            else:
+                entry.membackup_offset = tmp.membackup_offset
+                entry.membackup_len = tmp.membackup_len
 
         #write trampoline
         if self.trampoline_type == TrampolineType.LONG_TRAMPOLINE:
@@ -805,7 +808,6 @@ class PatchOwnStrategy (PatchStrategy):
             ret = alloc_trampoline(target_addr)
         else:
             raise gdb.GdbError("Got wrong type of trampoline.")
-        inferior = gdb.selected_inferior()
         if ret == 0:
             trampoline = AbsoluteTrampoline()
             trampoline.complete_address(patch_addr_arr)
@@ -820,7 +822,8 @@ class PatchOwnStrategy (PatchStrategy):
             short_trampoline.write_trampoline(target_addr)
 
         #write changes to the log
-        add_log_entry(entry, backup)
+        if mark_log_entry:
+            add_log_entry(entry, backup)
 
     def clean(self):
         self.dlclose(self.lib_handle)
@@ -829,7 +832,7 @@ class PatchLibStrategy (PatchStrategy):
     def __init__(self, lib_handle: gdb.Value, dlclose: gdb.Value, path: str, target_func: str, patch_func: str):
         super().__init__(lib_handle, dlclose, path, target_func, patch_func)
 
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int):
+    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
         inferior = gdb.selected_inferior()
         #find target and patch functions
         try:
@@ -854,23 +857,24 @@ class PatchLibStrategy (PatchStrategy):
         steal_refcount(target_ptr, self.path)
 
         #write to log
-        entry = struct_log_entry(target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
-        backup = struct_patch_backup(None, None)
-        if path_offset != -1:
-            entry.path_offset = path_offset
-            entry.path_len = path_len
-        else:
-            backup.path = self.path
-            entry.path_len = len(self.path)
+        if mark_log_entry:
+            entry = struct_log_entry(target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
+            backup = struct_patch_backup(None, None)
+            if path_offset != -1:
+                entry.path_offset = path_offset
+                entry.path_len = path_len
+            else:
+                backup.path = self.path
+                entry.path_len = len(self.path)
 
-        tmp = find_first_patch(target_ptr)
-        if tmp is None:
-            backup.membackup = bytearray(inferior.read_memory(addr_got, 8))
-            entry.membackup_len = len(backup.membackup)
-        else:
-            entry.membackup_offset = tmp.membackup_offset
-            entry.membackup_len = tmp.membackup_len
-        add_log_entry(entry, backup)
+            tmp = find_first_patch(target_ptr)
+            if tmp is None:
+                backup.membackup = bytearray(inferior.read_memory(addr_got, 8))
+                entry.membackup_len = len(backup.membackup)
+            else:
+                entry.membackup_offset = tmp.membackup_offset
+                entry.membackup_len = tmp.membackup_len
+            add_log_entry(entry, backup)
 
         #write patch function address
         inferior.write_memory(addr_got, patch_arr, 8)
@@ -939,11 +943,17 @@ class Patch (gdb.Command):
         global master_lib_path
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
-        if len(argv) != 1:
-            raise gdb.GdbError("patch takes one parameter")
+        if len(argv) != 1 and len(argv) != 2:
+            raise gdb.GdbError("patch takes one or two parameter")
 
         if not is_attached():
             raise gdb.GdbError("No process attached.")
+
+        mark_log_entry = False
+        if len(argv) == 2:
+            if argv[1] != "--log":
+                return
+            mark_log_entry = True
 
         #find necessary objects
         self.dlopen_addr = find_object("dlopen")
@@ -962,6 +972,7 @@ class Patch (gdb.Command):
         tmp.contains_log = True
         write_header(master_lib_path, tmp)
         counter = 0
+        first_entry = None
 
         #TODO check all metadata before applying patch
         for patch in metadata:
@@ -977,11 +988,11 @@ class Patch (gdb.Command):
             elif patch[0] == 'L':
                 self.strategy = PatchLibStrategy(self.dlopen_ret, self.dlclose_addr, argv[0], target_func, patch_func)
 
-            if counter == 0:
-                self.strategy.do_patch(-1, 0, -1, 0)
+            if counter == 0 or first_entry is None:
+                self.strategy.do_patch(-1, 0, -1, 0, mark_log_entry)
                 first_entry = get_last_log_entry()
             else:
-                self.strategy.do_patch(first_entry.path_offset, first_entry.path_len, -1, 0)
+                self.strategy.do_patch(first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
             counter += 1
 
 #WARNING!!! sets found library as inactive
@@ -1013,6 +1024,7 @@ class ReapplyPatch(gdb.Command):
         for entry in entries:
             if not entry.is_active:
                 continue
+            entry.is_active = False
             backup = read_log_entry_data(entry)
             if backup.path is None or backup.membackup is None:
                 raise gdb.GdbError("Cannot find memory backup or path.")
@@ -1029,6 +1041,7 @@ class ReapplyPatch(gdb.Command):
                 inferior.write_memory(got_entry, backup.membackup, len(backup.membackup))
 
             decrease_refcount(backup.path)
+        entry_array_to_log(entries)
 
     def revert(self, argv: list[str]):
         if len(argv) == 1:

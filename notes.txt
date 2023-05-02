@@ -4,8 +4,6 @@
 -najst dlopen poriadne
 -skusit zmenit postup aby cielovy proces nemusel otvorit kniznicu (keby nemal pristup k suborovemu systemu)
 
-https://stackoverflow.com/questions/70177811/how-do-i-use-the-second-value-constructor-in-gdbs-python-api
-
 hlavny todo list:
 -upratat kod aby patchovanie a reaplikovanie patchu vykonaval rovnaky kod
 -ktora trampolina sa pouzije
