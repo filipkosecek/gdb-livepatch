@@ -193,36 +193,35 @@ def write_header(objfile_path: str, header: struct_header) -> None:
 
     inferior.write_memory(header_addr, buffer, len(buffer))
 
-def find_mappings() -> tuple[set[int], dict[int, int]]:
+def find_mappings() -> set[int]:
     mappings = gdb.execute("info proc mappings", to_string=True)
     mappings_list = re.findall(MAPPINGS_LINE_REGEX, mappings, re.MULTILINE)
     allocated_pages = set()
-    allocated_pages_sizes = dict()
     for line in mappings_list:
         tmp = line.split()
         page = int(tmp[0], 16)
         size = int(tmp[2], 16)
-        allocated_pages.add(page)
-        allocated_pages_sizes[page] = size
-    return allocated_pages, allocated_pages_sizes
+        offset = 0
+        while offset < size:
+            allocated_pages.add(page + offset)
+            offset += PAGE_SIZE
+    return allocated_pages
 
 def find_nearest_free_page(address: int) -> int:
-    current = address & 0xfffffffffffff000
-    ret = find_mappings()
-    allocated_pages = ret[0]
-    allocated_pages_sizes = ret[1]
-    left = current
-    right = current
+    current = address & PAGE_MASK
+    allocated_pages = find_mappings()
+    left = current - PAGE_SIZE
+    right = current + PAGE_SIZE
     while left > 0 or right < 0x7fffffffffff:
         if left > 0:
             if abs(left - current) <= MAX_PAGE_DIST and left not in allocated_pages:
                 return left
-            left -= allocated_pages_sizes[left]
+            left -= PAGE_SIZE
 
         if right < 0x7fffffffffff:
             if abs(right - current) <= MAX_PAGE_DIST and right not in allocated_pages:
                 return right
-            right += allocated_pages_sizes[right]
+            right += PAGE_SIZE
 
     return 0
 
