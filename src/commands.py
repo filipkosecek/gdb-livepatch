@@ -729,122 +729,96 @@ class RelativeTrampoline:
     def write_trampoline(self, address: int):
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
-class PatchStrategy:
-    def __init__(self, lib_handle: gdb.Value, path: str, target_func: int, patch_func: int):
-        self.lib_handle = lib_handle
-        self.path = path
-        self.target_func = target_func
-        self.patch_func = patch_func
+def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool, trampoline_type: TrampolineType):
+    #control flow must not be where the trampoline is about to be inserted
+    #TODO control flow must not be in the function, it may lead to crash
+    rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
+    if rip >= target_addr and rip < target_addr + 13:
+        raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
 
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        pass
+    patch_addr_arr = patch_addr.to_bytes(8, byteorder = BYTE_ORDER)
 
-class PatchOwnStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, path: str,  target_func: int, patch_func: int, trampoline_type: TrampolineType):
-        super().__init__(lib_handle, path, target_func, patch_func)
-        self.trampoline_type = trampoline_type
-
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        target_addr = self.target_func
-        patch_addr = self.patch_func
-
-        #control flow must not be where the trampoline is about to be inserted
-        #TODO control flow must not be in the function, it may lead to crash
-        rip = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
-        if rip >= target_addr and rip < target_addr + 13:
-            self.clean()
-            raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
-
-        patch_addr_arr = patch_addr.to_bytes(8, byteorder = BYTE_ORDER)
-
-        #steal refcount
-        steal_refcount(target_addr, self.path)
-        #write to log
-        if mark_log_entry:
-            entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
-            backup = struct_patch_backup(None, None)
-            if path_offset != -1:
-                entry.path_offset = path_offset
-                entry.path_len = path_len
-            else:
-                backup.path = self.path
-                entry.path_len = len(self.path)
-
-            tmp = find_first_patch(target_addr)
-            if tmp is None:
-                backup.membackup = bytearray(inferior.read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
-                entry.membackup_len = len(backup.membackup)
-            else:
-                entry.membackup_offset = tmp.membackup_offset
-                entry.membackup_len = tmp.membackup_len
-
-        #write trampoline
-        if self.trampoline_type == TrampolineType.LONG_TRAMPOLINE:
-            ret = 0
-        elif self.trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
-            ret = alloc_trampoline(target_addr)
+    #steal refcount
+    steal_refcount(target_addr, path)
+    #write to log
+    if mark_log_entry:
+        entry = struct_log_entry(target_addr, patch_addr, "O", int(time.time()), 0, True, 0, 0, 0)
+        backup = struct_patch_backup(None, None)
+        if path_offset != -1:
+            entry.path_offset = path_offset
+            entry.path_len = path_len
         else:
-            raise gdb.GdbError("Got wrong type of trampoline.")
-        if ret == 0:
-            trampoline = AbsoluteTrampoline()
-            trampoline.complete_address(patch_addr_arr)
-            trampoline.write_trampoline(target_addr)
+            backup.path = path
+            entry.path_len = len(path)
+
+        tmp = find_first_patch(target_addr)
+        if tmp is None:
+            backup.membackup = bytearray(inferior.read_memory(target_addr, ABSOLUTE_TRAMPOLINE_SIZE))
+            entry.membackup_len = len(backup.membackup)
         else:
-            short_trampoline = RelativeTrampoline()
-            long_trampoline = AbsoluteTrampoline()
-            long_trampoline.complete_address(patch_addr.to_bytes(8, BYTE_ORDER))
-            relative_offset = ret - target_addr - SHORT_TRAMPOLINE_SIZE
-            short_trampoline.complete_address(relative_offset)
-            long_trampoline.write_trampoline(ret)
-            short_trampoline.write_trampoline(target_addr)
+            entry.membackup_offset = tmp.membackup_offset
+            entry.membackup_len = tmp.membackup_len
 
-        #write changes to the log
-        if mark_log_entry:
-            add_log_entry(entry, backup)
+    #write trampoline
+    if trampoline_type == TrampolineType.LONG_TRAMPOLINE:
+        ret = 0
+    elif trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
+        ret = alloc_trampoline(target_addr)
+    else:
+        raise gdb.GdbError("Got wrong type of trampoline.")
+    if ret == 0:
+        trampoline = AbsoluteTrampoline()
+        trampoline.complete_address(patch_addr_arr)
+        trampoline.write_trampoline(target_addr)
+    else:
+        short_trampoline = RelativeTrampoline()
+        long_trampoline = AbsoluteTrampoline()
+        long_trampoline.complete_address(patch_addr.to_bytes(8, BYTE_ORDER))
+        relative_offset = ret - target_addr - SHORT_TRAMPOLINE_SIZE
+        short_trampoline.complete_address(relative_offset)
+        long_trampoline.write_trampoline(ret)
+        short_trampoline.write_trampoline(target_addr)
 
-class PatchLibStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, path: str, target_func: int, patch_func: int):
-        super().__init__(lib_handle, path, target_func, patch_func)
+    #write changes to the log
+    if mark_log_entry:
+        add_log_entry(entry, backup)
 
-    def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        target_ptr = self.target_func
-        patch = self.patch_func
+def do_patch_lib(target_ptr: int, patch: int, path: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
+    #fetch relative offset
+    relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
 
-        #fetch relative offset
-        relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
+    #fetch next instruction's address
+    next_instruction = target_ptr + 6
 
-        #fetch next instruction's address
-        next_instruction = target_ptr + 6
+    #calculate got.plt entry
+    addr_got = next_instruction + relative_addr
+    patch_arr = patch.to_bytes(8, byteorder = BYTE_ORDER)
 
-        #calculate got.plt entry
-        addr_got = next_instruction + relative_addr
-        patch_arr = patch.to_bytes(8, byteorder = BYTE_ORDER)
+    #steal refcount
+    steal_refcount(target_ptr, path)
 
-        #steal refcount
-        steal_refcount(target_ptr, self.path)
+    #write to log
+    if mark_log_entry:
+        entry = struct_log_entry(target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
+        backup = struct_patch_backup(None, None)
+        if path_offset != -1:
+            entry.path_offset = path_offset
+            entry.path_len = path_len
+        else:
+            backup.path = path
+            entry.path_len = len(path)
 
-        #write to log
-        if mark_log_entry:
-            entry = struct_log_entry(target_ptr, patch, "L", int(time.time()), 0, True, 0, 0, 0)
-            backup = struct_patch_backup(None, None)
-            if path_offset != -1:
-                entry.path_offset = path_offset
-                entry.path_len = path_len
-            else:
-                backup.path = self.path
-                entry.path_len = len(self.path)
+        tmp = find_first_patch(target_ptr)
+        if tmp is None:
+            backup.membackup = bytearray(inferior.read_memory(addr_got, 8))
+            entry.membackup_len = len(backup.membackup)
+        else:
+            entry.membackup_offset = tmp.membackup_offset
+            entry.membackup_len = tmp.membackup_len
+        add_log_entry(entry, backup)
 
-            tmp = find_first_patch(target_ptr)
-            if tmp is None:
-                backup.membackup = bytearray(inferior.read_memory(addr_got, 8))
-                entry.membackup_len = len(backup.membackup)
-            else:
-                entry.membackup_offset = tmp.membackup_offset
-                entry.membackup_len = tmp.membackup_len
-            add_log_entry(entry, backup)
-
-        #write patch function address
-        inferior.write_memory(addr_got, patch_arr, 8)
+    #write patch function address
+    inferior.write_memory(addr_got, patch_arr, 8)
 
 class Patch (gdb.Command):
     "Patch functions."
@@ -970,16 +944,16 @@ class Patch (gdb.Command):
                 trampoline_type = TrampolineType.SHORT_TRAMPOLINE
 
             if patch[0] == 'O':
-                self.strategy = PatchOwnStrategy(self.dlopen_ret, argv[0], target_func, patch_func, trampoline_type)
+                if counter == 0 or first_entry is None:
+                    do_patch_own(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry, trampoline_type)
+                else:
+                    do_patch_own(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry, trampoline_type)
             elif patch[0] == 'L':
-                self.strategy = PatchLibStrategy(self.dlopen_ret, argv[0], target_func, patch_func)
-
-            if counter == 0 or first_entry is None:
-                self.strategy.do_patch(-1, 0, -1, 0, mark_log_entry)
-                first_entry = get_last_log_entry()
-            else:
-                self.strategy.do_patch(first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
-            counter += 1
+                if counter == 0 or first_entry is None:
+                    do_patch_lib(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry)
+                else:
+                    do_patch_lib(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
+        counter += 1
 
 #WARNING!!! sets found library as inactive
 #TODO poor design
