@@ -730,7 +730,7 @@ class RelativeTrampoline:
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
 class PatchStrategy:
-    def __init__(self, lib_handle: gdb.Value, path: str, target_func: str, patch_func: str):
+    def __init__(self, lib_handle: gdb.Value, path: str, target_func: int, patch_func: int):
         self.lib_handle = lib_handle
         self.path = path
         self.target_func = target_func
@@ -738,27 +738,15 @@ class PatchStrategy:
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
         pass
-    
-    def clean(self):
-        pass
 
 class PatchOwnStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, path: str,  target_func: str, patch_func: str, trampoline_type: TrampolineType):
+    def __init__(self, lib_handle: gdb.Value, path: str,  target_func: int, patch_func: int, trampoline_type: TrampolineType):
         super().__init__(lib_handle, path, target_func, patch_func)
         self.trampoline_type = trampoline_type
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        match = re.match(HEX_REGEX, self.target_func)
-        if match:
-            target_addr = int(self.target_func, 16)
-        else:
-            try:
-                target_addr = find_object(self.target_func)
-                target_addr = int(target_addr.cast(gdb.lookup_type("uint64_t")))
-            except:
-                #TODO
-                self.clean()
-                raise gdb.GdbError("Couldn't find target function symbol.")
+        target_addr = self.target_func
+        patch_addr = self.patch_func
 
         #control flow must not be where the trampoline is about to be inserted
         #TODO control flow must not be in the function, it may lead to crash
@@ -767,11 +755,6 @@ class PatchOwnStrategy (PatchStrategy):
             self.clean()
             raise gdb.GdbError("The code segment where the trampoline is about to be inserted is being executed.")
 
-        #try to resolve symbol for patch function
-        try:
-            patch_addr = find_object_dlsym(self.patch_func, self.path)
-        except:
-            raise gdb.GdbError("Couldn't find " + self.patch_func  + " symbol.")
         patch_addr_arr = patch_addr.to_bytes(8, byteorder = BYTE_ORDER)
 
         #steal refcount
@@ -819,22 +802,14 @@ class PatchOwnStrategy (PatchStrategy):
         if mark_log_entry:
             add_log_entry(entry, backup)
 
-    def clean(self):
-        dlclose(self.lib_handle)
-
 class PatchLibStrategy (PatchStrategy):
-    def __init__(self, lib_handle: gdb.Value, path: str, target_func: str, patch_func: str):
+    def __init__(self, lib_handle: gdb.Value, path: str, target_func: int, patch_func: int):
         super().__init__(lib_handle, path, target_func, patch_func)
 
     def do_patch(self, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
-        #find target and patch functions
-        try:
-            target = "'" + self.target_func + "@plt'"
-            target = find_object(target)
-            target_ptr = int(target.cast(gdb.lookup_type("uint64_t")))
-            patch = find_object_dlsym(self.patch_func, self.path)
-        except:
-            dlclose(self.lib_handle)
+        target_ptr = self.target_func
+        patch = self.patch_func
+
         #fetch relative offset
         relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
 
@@ -871,9 +846,6 @@ class PatchLibStrategy (PatchStrategy):
         #write patch function address
         inferior.write_memory(addr_got, patch_arr, 8)
 
-    def clean(self):
-        pass
-
 class Patch (gdb.Command):
     "Patch functions."
 
@@ -882,35 +854,40 @@ class Patch (gdb.Command):
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
-    def check_patch_metadata(self, instructions: list[list[str]], path: str) -> bool:
+    def check_patch_metadata(self, instructions: list[list[str]], path: str) -> list[tuple[str, str, int, int]]:
+        result = []
         for instruction in instructions:
             if instruction[0] != 'O' and instruction[0] != 'L':
-                return False
+                return None
             if instruction[1] != 'L' and instruction[1] != 'S' and instruction[1] != 'N':
-                return False
+                return None
 
         for instruction in instructions:
+            patch_func = instruction[3]
+            try:
+                patch_ptr = find_object_dlsym(patch_func, path)
+            except:
+                return None
+
             target_func = instruction[2]
             if instruction[0] == 'O':
                 match = re.match(HEX_REGEX, target_func)
-                try:
-                    find_object(target_func)
-                except:
-                    if not match:
-                        return False
+                if match is not None:
+                    target_ptr = int(target_func, 16)
+                else:
+                    try:
+                        target_ptr = int(find_object(target_func).cast(gdb.lookup_type("uint64_t")))
+                    except:
+                        return None
             else:
                 try:
                     target = "'" + target_func + "@plt'"
-                    find_object(target)
+                    target_ptr = int(find_object(target).cast(gdb.lookup_type("uint64_t")))
                 except:
-                    return False
+                    return None
 
-            patch_func = instruction[3]
-            try:
-                find_object_dlsym(patch_func, path)
-            except:
-                return False
-        return True
+            result.append((instruction[0], instruction[1], target_ptr, patch_ptr))
+        return result
 
     def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
         header = read_header(objfile)
@@ -971,7 +948,8 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
-        if not self.check_patch_metadata(metadata, argv[0]):
+        patch_commands = self.check_patch_metadata(metadata, argv[0])
+        if patch_commands is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("The library has invalid data.")
         if not master_lib_path:
@@ -983,7 +961,7 @@ class Patch (gdb.Command):
         first_entry = None
 
         #TODO check all metadata before applying patch
-        for patch in metadata:
+        for patch in patch_commands:
             target_func = patch[2]
             patch_func = patch[3]
             if patch[1] == "L":
