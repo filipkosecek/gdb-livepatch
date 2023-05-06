@@ -835,7 +835,6 @@ class PatchLibStrategy (PatchStrategy):
             patch = find_object_dlsym(self.patch_func, self.path)
         except:
             dlclose(self.lib_handle)
-
         #fetch relative offset
         relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
 
@@ -883,12 +882,33 @@ class Patch (gdb.Command):
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
-    def check_patch_metadata(self, instructions: list[list[str]]) -> bool:
+    def check_patch_metadata(self, instructions: list[list[str]], path: str) -> bool:
         for instruction in instructions:
             if instruction[0] != 'O' and instruction[0] != 'L':
                 return False
             if instruction[1] != 'L' and instruction[1] != 'S' and instruction[1] != 'N':
-                print(False)
+                return False
+
+        for instruction in instructions:
+            target_func = instruction[2]
+            if instruction[0] == 'O':
+                match = re.match(HEX_REGEX, target_func)
+                try:
+                    find_object(target_func)
+                except:
+                    if not match:
+                        return False
+            else:
+                try:
+                    target = "'" + target_func + "@plt'"
+                    find_object(target)
+                except:
+                    return False
+
+            patch_func = instruction[3]
+            try:
+                find_object_dlsym(patch_func, path)
+            except:
                 return False
         return True
 
@@ -951,9 +971,9 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
-        if not self.check_patch_metadata(metadata):
-            #TODO close the library
-            return
+        if not self.check_patch_metadata(metadata, argv[0]):
+            dlclose(self.dlopen_ret)
+            raise gdb.GdbError("The library has invalid data.")
         if not master_lib_path:
             master_lib_path = argv[0]
         tmp = read_header(master_lib_path)
