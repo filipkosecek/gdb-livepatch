@@ -139,6 +139,8 @@ class struct_header:
         print(self.patch_data_array_len)
         print(self.commands_len)
 
+#TODO check if lookup_static_symbol throws an exception ot returns None
+#TODO objfile lookup is probably unnecessary
 def read_header(objfile_path: str) -> struct_header:
     patchlib = gdb.lookup_objfile(objfile_path)
     if patchlib is None:
@@ -576,8 +578,8 @@ def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup
     log_size = header.log_entries_count*LOG_ENTRY_SIZE
     backup_size = header.patch_data_array_len
     patch_backup_ptr += backup_size
-    #TODO at least print an error message
     if log_size + LOG_ENTRY_SIZE > LOG_SIZE or backup_size + patch_backup.size() > PATCH_BACKUP_SIZE:
+        print("The log is full.")
         return None
     offset = header.patch_data_array_len
     #update header
@@ -824,6 +826,14 @@ def do_patch_lib(target_ptr: int, patch: int, path: str, path_offset: int, path_
     #write patch function address
     inferior.write_memory(addr_got, patch_arr, 8)
 
+def find_first_log_lib(path: str) -> struct_log_entry:
+    entries = log_to_entry_array()
+    for entry in entries:
+        data = read_log_entry_data(entry)
+        if data.path == path:
+            return entry
+    return None
+
 class Patch (gdb.Command):
     "Patch functions."
 
@@ -870,15 +880,15 @@ class Patch (gdb.Command):
     def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
         header = read_header(objfile)
         if header is None:
-            #TODO
-            raise gdb.GdbError("Couldn't find header.")
+            print("Couldn't find patch header.")
+            return None
         commands_len = header.commands_len
         commands = find_object_dlsym(PATCH_COMMANDS_VAR_NAME, objfile)
 
         items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")
         result = []
         for item in items:
-            #TODO
+            #string is split by ';', the last element is empty
             if not item:
                 continue
             result.append(item.split(":"))
@@ -892,13 +902,13 @@ class Patch (gdb.Command):
         except:
             raise gdb.GdbError("Required types were not supported.")
  
-    #TODO check -> magic const must be equal to the one defined in C header
+    #magic constant checking is in read_header function
     def load_patch_lib(self, path: str):
         self.dlopen_ret = dlopen(c_string(path), 2)
         if self.dlopen_ret == NULL:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
-        if header is None or header.magic != MAGIC_CONSTANT:
+        if header is None:
             raise gdb.GdbError("Object file " + path + " has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
@@ -926,6 +936,9 @@ class Patch (gdb.Command):
 
         self.load_patch_lib(argv[0])
         metadata = self.extract_patch_metadata(argv[0])
+        if metadata is None:
+            dlclose(self.dlopen_ret)
+            raise gdb.GdbError("The library has invalid data.")
         patch_commands = self.check_patch_metadata(metadata, argv[0])
         if patch_commands is None:
             dlclose(self.dlopen_ret)
@@ -935,10 +948,9 @@ class Patch (gdb.Command):
         tmp = read_header(master_lib_path)
         tmp.contains_log = True
         write_header(master_lib_path, tmp)
-        counter = 0
+
         first_entry = None
 
-        #TODO check all metadata before applying patch
         for patch in patch_commands:
             target_func = patch[2]
             patch_func = patch[3]
@@ -947,17 +959,23 @@ class Patch (gdb.Command):
             elif patch[1] == "S":
                 trampoline_type = TrampolineType.SHORT_TRAMPOLINE
 
+            if first_entry is None:
+                first_entry = find_first_log_lib(argv[0])
+
             if patch[0] == 'O':
-                if counter == 0 or first_entry is None:
+                #the first entry to be logged
+                if first_entry is None:
                     do_patch_own(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry, trampoline_type)
+                #copy the references from the first entry from this library, i.e. first_entry
                 else:
-                    do_patch_own(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry, trampoline_type)
+                    do_patch_own(target_func, patch_func, argv[0], first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry, trampoline_type)
             elif patch[0] == 'L':
-                if counter == 0 or first_entry is None:
+                #the first entry to be logged
+                if first_entry is None:
                     do_patch_lib(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry)
+                #copy the references from the first entry from this library, i.e. first_entry
                 else:
-                    do_patch_lib(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
-        counter += 1
+                    do_patch_lib(target_func, patch_func, argv[0], first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
 
 #WARNING!!! sets found library as inactive
 #TODO poor design
