@@ -10,7 +10,6 @@ type_list = ["uint64_t"]
 PAGE_SIZE = 4096
 PAGE_MASK = 0xfffffffffffff000
 BYTE_ORDER = "little"
-#TODO replace 0 with NULL constant
 NULL = 0
 
 #metadata structures sizes and names
@@ -224,7 +223,7 @@ def find_nearest_free_page(address: int) -> int:
                 return right
             right += PAGE_SIZE
 
-    return 0
+    return NULL
 
 def init_trampoline_bitmap(address: int):
     inferior.write_memory(address, bytearray(TRAMPOLINE_BITMAP_SIZE), TRAMPOLINE_BITMAP_SIZE)
@@ -291,16 +290,16 @@ def exec_mprotect(address: int, size: int, prot: int) -> int:
 def alloc_trampoline_page(page_base: int, target_function_ptr: int) -> int:
     ptr = exec_mmap(page_base, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if ptr == -1:
-        return 0
+        return NULL
     if abs(ptr - target_function_ptr) > (pow(2,31) - 1):
         exec_munmap(ptr, PAGE_SIZE)
-        return 0
+        return NULL
     init_trampoline_bitmap(ptr)
     return ptr
 
 def free_trampoline_page(address: int):
     hdr = read_header(master_lib_path)
-    hdr.trampoline_page_ptr = 0
+    hdr.trampoline_page_ptr = NULL
     write_header(master_lib_path, hdr)
     if exec_munmap(address, PAGE_SIZE) == -1:
         raise gdb.GdbError("Couldn't unmap the page.")
@@ -328,28 +327,28 @@ def find_first_free_trampoline_index(bitmap_address: int) -> int:
 
 def alloc_trampoline(target_function_address: int) -> int:
     hdr = read_header(master_lib_path)
-    if hdr.trampoline_page_ptr == 0:
+    if hdr.trampoline_page_ptr == NULL:
         page_base = find_nearest_free_page(target_function_address)
-        if page_base == 0:
-            return 0
+        if page_base == NULL:
+            return NULL
         ret = alloc_trampoline_page(page_base, target_function_address)
-        if ret == 0:
-            return 0
+        if ret == NULL:
+            return NULL
         hdr.trampoline_page_ptr = ret
         write_header(master_lib_path, hdr)
     else:
         #TODO validate this
         #abort if the function is too far from the already allocated trampoline page
         if abs(target_function_address - hdr.trampoline_page_ptr) > (pow(2, 31) - 1):
-            return 0
+            return NULL
     index = find_first_free_trampoline_index(hdr.trampoline_page_ptr)
     if index == -1:
-        return 0
+        return NULL
     return hdr.trampoline_page_ptr + TRAMPOLINE_BITMAP_SIZE + index*PADDED_TRAMPOLINE_SIZE
 
 def free_trampoline(trampoline_address: int):
     hdr = read_header(master_lib_path)
-    if hdr.trampoline_page_ptr == 0:
+    if hdr.trampoline_page_ptr == NULL:
         return
     index = int((trampoline_address - hdr.trampoline_page_ptr - TRAMPOLINE_BITMAP_SIZE) / PADDED_TRAMPOLINE_SIZE)
     word_index = int(index / 8)
@@ -371,10 +370,10 @@ def get_instruction_prefix(addr: int) -> int:
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     hdr = read_header(objfile_name)
     if hdr is None:
-        return 0
+        return NULL
     libhandle = hdr.libhandle
     symbol_address = int(dlsym(libhandle, c_string(symbol_name)).cast(gdb.lookup_type("uint64_t")))
-    if symbol_address == 0:
+    if symbol_address == NULL:
         raise gdb.GdbError("Couldn't find symbol " + symbol_name)
     return symbol_address
 
@@ -382,11 +381,11 @@ def alloc_log_storage():
     hdr = read_header(master_lib_path)
     hdr.log_page_ptr = exec_mmap(NULL, LOG_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if hdr.log_page_ptr == -1:
-        return 0
+        return NULL
     hdr.patch_backup_page_ptr = exec_mmap(NULL, PATCH_BACKUP_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if hdr.patch_backup_page_ptr == -1:
         exec_munmap(hdr.log_page_ptr, LOG_SIZE)
-        return 0
+        return NULL
     write_header(master_lib_path, hdr)
 
 def free_log_storage():
@@ -422,7 +421,7 @@ class struct_log_entry:
         global master_lib_path
         hdr = read_header(master_lib_path)
         backup_ptr = hdr.patch_backup_page_ptr
-        if backup_ptr == 0:
+        if backup_ptr == NULL:
             path = ""
         else:
             backup_ptr += self.path_offset
@@ -664,7 +663,7 @@ def close_lib(lib: str):
                 is_last = False
                 break
     if is_last:
-        if hdr.trampoline_page_ptr != 0:
+        if hdr.trampoline_page_ptr != NULL:
             free_trampoline_page(hdr.trampoline_page_ptr)
         if hdr.log_page_ptr != NULL or hdr.patch_backup_page_ptr != NULL:
             free_log_storage()
@@ -766,12 +765,12 @@ def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int,
 
     #write trampoline
     if trampoline_type == TrampolineType.LONG_TRAMPOLINE:
-        ret = 0
+        ret = NULL
     elif trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
         ret = alloc_trampoline(target_addr)
     else:
         raise gdb.GdbError("Got wrong type of trampoline.")
-    if ret == 0:
+    if ret == NULL:
         trampoline = AbsoluteTrampoline()
         trampoline.complete_address(patch_addr_arr)
         trampoline.write_trampoline(target_addr)
@@ -896,7 +895,7 @@ class Patch (gdb.Command):
     #TODO check -> magic const must be equal to the one defined in C header
     def load_patch_lib(self, path: str):
         self.dlopen_ret = dlopen(c_string(path), 2)
-        if self.dlopen_ret == 0:
+        if self.dlopen_ret == NULL:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None or header.magic != MAGIC_CONSTANT:
@@ -1088,7 +1087,7 @@ class ReapplyPatch(gdb.Command):
         steal_refcount(log_entry.target_func_ptr, data.path)
         if log_entry.patch_type == "O":
             ret = alloc_trampoline(log_entry.target_func_ptr)
-            if ret == 0:
+            if ret == NULL:
                 trampoline = AbsoluteTrampoline()
                 trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER)))
                 trampoline.write_trampoline(log_entry.target_func_ptr)
