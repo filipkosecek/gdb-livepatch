@@ -10,6 +10,7 @@ type_list = ["uint64_t"]
 PAGE_SIZE = 4096
 PAGE_MASK = 0xfffffffffffff000
 BYTE_ORDER = "little"
+#TODO replace 0 with NULL constant
 NULL = 0
 
 #metadata structures sizes and names
@@ -377,11 +378,15 @@ def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
         raise gdb.GdbError("Couldn't find symbol " + symbol_name)
     return symbol_address
 
-#TODO check if mmap return value
 def alloc_log_storage():
     hdr = read_header(master_lib_path)
     hdr.log_page_ptr = exec_mmap(NULL, LOG_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    if hdr.log_page_ptr == -1:
+        return 0
     hdr.patch_backup_page_ptr = exec_mmap(NULL, PATCH_BACKUP_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    if hdr.patch_backup_page_ptr == -1:
+        exec_munmap(hdr.log_page_ptr, LOG_SIZE)
+        return 0
     write_header(master_lib_path, hdr)
 
 def free_log_storage():
