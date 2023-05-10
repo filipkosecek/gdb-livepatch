@@ -1013,6 +1013,10 @@ class Patch (gdb.Command):
     # API method which is called when the user invokes the command
     def invoke(self, arg, from_tty):
         global master_lib_path
+
+        # ensures the command is not repeated when the user hits enter
+        self.dont_repeat()
+
         self.type_dict.clear()
         argv = gdb.string_to_argv(arg)
         if len(argv) != 1 and len(argv) != 2:
@@ -1175,6 +1179,10 @@ class ReapplyPatch(gdb.Command):
     # takes a number and optionally a list as parameters
     def invoke(self, arg, from_tty):
         global master_lib_path
+
+        # ensures the command is not repeated when the user hits enter
+        self.dont_repeat()
+
         argv = gdb.string_to_argv(arg)
         if len(arg) < 1:
            raise gdb.GdbError("patch-reapply takes one parameter")
@@ -1279,6 +1287,10 @@ class PatchLogDump(gdb.Command):
     # takes one argument - the file path
     def invoke(self, arg, from_tty):
         global master_lib_path
+
+        # ensures the command is not repeated when the user hits enter
+        self.dont_repeat()
+
         argv = gdb.string_to_argv(arg)
 
         init_global_vars()
