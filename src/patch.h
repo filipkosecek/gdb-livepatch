@@ -9,7 +9,7 @@
 /* size constants */
 #define PAGE_SIZE 4096
 #define HEADER_SIZE 48
-#define MAGIC_CONST 1024
+#define MAGIC_CONST 428761983
 
 /* variable attributes*/
 #define PATCH_SECTION __attribute__((section(PATCH_SECTION_NAME)))
