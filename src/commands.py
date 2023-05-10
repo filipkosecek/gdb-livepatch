@@ -13,7 +13,7 @@ BYTE_ORDER = "little"
 NULL = 0
 
 # metadata structures sizes and corresponding symbol names
-MAGIC_CONSTANT = 1024
+MAGIC_CONSTANT = 428761983
 HEADER_SIZE = 48
 LOG_ENTRY_SIZE = 32
 LOG_SIZE = 2*4096
@@ -1002,6 +1002,7 @@ class Patch (gdb.Command):
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None:
+            dlclose(self.dlopen_ret)
             raise gdb.GdbError("Object file has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
