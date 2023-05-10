@@ -6,13 +6,13 @@ from enum import Enum
 
 type_list = ["uint64_t"]
 
-#x86_64 architecture specific
+# x86_64 architecture specifics
 PAGE_SIZE = 4096
 PAGE_MASK = 0xfffffffffffff000
 BYTE_ORDER = "little"
 NULL = 0
 
-#metadata structures sizes and names
+# metadata structures sizes and corresponding symbol names
 MAGIC_CONSTANT = 1024
 HEADER_SIZE = 48
 LOG_ENTRY_SIZE = 32
@@ -21,24 +21,24 @@ PATCH_BACKUP_SIZE = PAGE_SIZE
 PATCH_HEADER_VAR_NAME = "patch_header"
 PATCH_COMMANDS_VAR_NAME = "patch_commands"
 
-#syscall numbers
+# syscall numbers
 SYS_MMAP = 9
 SYS_MPROTECT = 10
 SYS_MUNMAP = 11
-#mman prot
+# mman prot
 PROT_READ = 1
 PROT_WRITE = 2
 PROT_EXEC = 4
-#mman flags
+# mman flags
 MAP_PRIVATE = 2
 MAP_ANONYMOUS = 32
 
-#regexes
+# regexes
 HEX_REGEX = "0x[1-9a-f][0-9a-f]*"
 DECIMAL_REGEX = "[1-9][0-9]*"
 MAPPINGS_LINE_REGEX = "^ *" + HEX_REGEX + " *" + HEX_REGEX + " *" + HEX_REGEX
 
-#trampolines
+# trampolines
 TRAMPOLINE_BITMAP_SIZE = 32
 TRAMPOLINE_ARRAY_SIZE = 254
 ABSOLUTE_TRAMPOLINE_SIZE = 13
@@ -47,25 +47,32 @@ SHORT_TRAMPOLINE_SIZE = 5
 
 MAX_PAGE_DIST = pow(2, 25)
 
-#global variables
+# global variables
 master_lib_path = ""
 inferior = None
 dlopen = NULL
 dlsym = NULL
 dlclose = NULL
 
+# simple enum for trampoline types
 class TrampolineType(Enum):
     LONG_TRAMPOLINE = 0
     SHORT_TRAMPOLINE = 1
 
+# check if GDB is attached to any process
+# should be called in every script entry point
 def is_attached() -> bool:
     return gdb.selected_inferior().pid != 0
 
+# convert a python string to a corresponding C string
+# should be used in every call of an inferior's function
 def c_string(s: str) -> gdb.Value:
     tmp = s + '\0'
     buffer = bytearray(tmp.encode())
     return gdb.Value(buffer, gdb.lookup_type("char").array(len(buffer)-1))
 
+# look up symbol symbol_name from file objfile_name
+# currently not used due to a bug in GDB
 def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     try:
         objfile = gdb.lookup_objfile(objfile_name)
@@ -75,6 +82,7 @@ def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
     else:
         return symbol
 
+# search the current scope for symbol symbol_name
 def find_object(symbol_name: str) -> gdb.Value:
     try:
         symbol = gdb.parse_and_eval(symbol_name)
@@ -83,6 +91,7 @@ def find_object(symbol_name: str) -> gdb.Value:
     else:
         return symbol
 
+# search the object file objfile_name for the symbol symbol_name
 def find_object_static(symbol_name: str, objfile_name: str) -> int:
     try:
         objfile = gdb.lookup_objfile(objfile_name)
@@ -92,6 +101,7 @@ def find_object_static(symbol_name: str, objfile_name: str) -> int:
     else:
         return symbol
 
+# initialize global variables, e.g. dlopen, dlsym and check if GDB is attached
 def init_global_vars():
     global inferior, dlopen, dlsym, dlclose
     if not is_attached():
@@ -101,6 +111,7 @@ def init_global_vars():
     dlsym = find_object("dlsym")
     dlclose = find_object("dlclose")
 
+# map address to the symbol name on the address using info symbol command
 def addr_to_symbol(address: int) -> str:
     cmd = gdb.execute("info symbol " + str(address), to_string=True)
     match = re.match("No symbol matches .*\.", cmd)
@@ -112,6 +123,7 @@ def addr_to_symbol(address: int) -> str:
         result = result.split('@')[0]
     return result
 
+# define header structure
 class struct_header:
     def __init__(self, magic: int, libhandle: int, trampoline_page_ptr: int, log_page_ptr: int, patch_backup_page_ptr: int, refcount: int, contains_log: bool, log_entries_count: int, patch_data_array_len: int, commands_len: int):
         self.magic = magic
@@ -141,6 +153,7 @@ class struct_header:
 
 #TODO check if lookup_static_symbol throws an exception ot returns None
 #TODO objfile lookup is probably unnecessary
+# read header from objfile_path file
 def read_header(objfile_path: str) -> struct_header:
     patchlib = gdb.lookup_objfile(objfile_path)
     if patchlib is None:
@@ -171,6 +184,7 @@ def read_header(objfile_path: str) -> struct_header:
     commands_len = int.from_bytes(buffer[44:48], BYTE_ORDER)
     return struct_header(magic, libhandle, trampoline_page_ptr, log_page_ptr, patch_backup_page_ptr, refcount, contains_log, log_entries_count, patch_data_array_len, commands_len)
 
+# write header to objfile_path file
 def write_header(objfile_path: str, header: struct_header) -> None:
     if header.magic != MAGIC_CONSTANT:
         raise gdb.GdbError("Got wrong value of magic constant while trying to write header.")
@@ -195,6 +209,8 @@ def write_header(objfile_path: str, header: struct_header) -> None:
 
     inferior.write_memory(header_addr, buffer, len(buffer))
 
+# parse process mappings from info proc mappings command
+# return a list containing allocated pages
 def find_mappings() -> set[int]:
     mappings = gdb.execute("info proc mappings", to_string=True)
     mappings_list = re.findall(MAPPINGS_LINE_REGEX, mappings, re.MULTILINE)
@@ -209,6 +225,7 @@ def find_mappings() -> set[int]:
             offset += PAGE_SIZE
     return allocated_pages
 
+# find the closest free page to the address
 def find_nearest_free_page(address: int) -> int:
     current = address & PAGE_MASK
     allocated_pages = find_mappings()
@@ -227,9 +244,11 @@ def find_nearest_free_page(address: int) -> int:
 
     return NULL
 
+# fill bitmap in the trampoline page with zeros
 def init_trampoline_bitmap(address: int):
     inferior.write_memory(address, bytearray(TRAMPOLINE_BITMAP_SIZE), TRAMPOLINE_BITMAP_SIZE)
 
+# make a backup of all general purpose registers
 def save_registers() -> dict[str, int]:
     result = dict()
     result["rip"] = int(gdb.parse_and_eval("$rip").cast(gdb.lookup_type("uint64_t")))
@@ -251,10 +270,12 @@ def save_registers() -> dict[str, int]:
     result["r15"] = int(gdb.parse_and_eval("$r15").cast(gdb.lookup_type("uint64_t")))
     return result
 
+# restore the values of the registers stored in registers dictionary
 def restore_registers(registers: dict[str, int]):
     for reg in registers:
         gdb.execute("set $" + reg + "=" + str(registers[reg]))
 
+# exec system call in the inferior process
 def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int) -> int:
     if syscall_number < 0 or syscall_number > 332:
         raise gdb.GdbError("No such system call.")
@@ -280,15 +301,21 @@ def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int
     inferior.write_memory(rip, membackup, 2)
     return ret
 
+# wrapper for mmap system call
 def exec_mmap(address: int, size: int, prot: int, flags: int, fd: int, offset: int) -> int:
     return exec_syscall(SYS_MMAP, address, size, prot, flags, fd, offset)
 
+# wrapper for munmap system call
 def exec_munmap(address: int, size: int) -> int:
     return exec_syscall(SYS_MUNMAP, address, size, 0, 0, 0, 0)
 
+# wrapper for mprotect system call
 def exec_mprotect(address: int, size: int, prot: int) -> int:
     return exec_syscall(SYS_MPROTECT, address, size, prot, 0, 0, 0)
 
+# allocate a trampoline page and initialize its bitmap
+# check if it is not too far from the target_function_ptr
+# when not able to allocate one, return NULL
 def alloc_trampoline_page(page_base: int, target_function_ptr: int) -> int:
     ptr = exec_mmap(page_base, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if ptr == -1:
@@ -299,6 +326,7 @@ def alloc_trampoline_page(page_base: int, target_function_ptr: int) -> int:
     init_trampoline_bitmap(ptr)
     return ptr
 
+# free the trampoline page
 def free_trampoline_page(address: int):
     hdr = read_header(master_lib_path)
     hdr.trampoline_page_ptr = NULL
@@ -306,6 +334,7 @@ def free_trampoline_page(address: int):
     if exec_munmap(address, PAGE_SIZE) == -1:
         raise gdb.GdbError("Couldn't unmap the page.")
 
+# search the trampoline bitmap and return current trampoline count
 def get_trampoline_count(bitmap_address: int) -> int:
     buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
     counter = 0
@@ -315,6 +344,8 @@ def get_trampoline_count(bitmap_address: int) -> int:
                 counter += 1
     return counter
 
+# find first free trampoline index in the trampoline bitmap
+# set its bit to allocated
 def find_first_free_trampoline_index(bitmap_address: int) -> int:
     buffer = bytearray(inferior.read_memory(bitmap_address, TRAMPOLINE_BITMAP_SIZE))
     for word_index in range(TRAMPOLINE_ARRAY_SIZE):
@@ -327,6 +358,8 @@ def find_first_free_trampoline_index(bitmap_address: int) -> int:
                 return word_index*8 + bit
     return -1
 
+# allocate a trampoline in the trampoline page
+# check if it is not too far from the target_function_address
 def alloc_trampoline(target_function_address: int) -> int:
     hdr = read_header(master_lib_path)
     if hdr.trampoline_page_ptr == NULL:
@@ -348,6 +381,7 @@ def alloc_trampoline(target_function_address: int) -> int:
         return NULL
     return hdr.trampoline_page_ptr + TRAMPOLINE_BITMAP_SIZE + index*PADDED_TRAMPOLINE_SIZE
 
+# free trampoline at trampoline_address address
 def free_trampoline(trampoline_address: int):
     hdr = read_header(master_lib_path)
     if hdr.trampoline_page_ptr == NULL:
@@ -360,15 +394,18 @@ def free_trampoline(trampoline_address: int):
     buffer[word_index] &= (~(1 << bit_index))
     inferior.write_memory(hdr.trampoline_page_ptr, buffer, len(buffer))
 
+# helper function to free the trampoline that the instruction at instruction_ptr points to
 def free_trampoline_from_instruction(instruction_ptr: int):
     instruction_ptr += 1
     relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, SHORT_TRAMPOLINE_SIZE - 1)), BYTE_ORDER, signed=True)
     free_trampoline(instruction_ptr + SHORT_TRAMPOLINE_SIZE + relative_offset)
 
+# get the first byte of the instruction at addr address
 def get_instruction_prefix(addr: int) -> int:
     tmp = bytearray(inferior.read_memory(addr, 1))
     return tmp[0]
 
+# find a symbol address in objfile_name file using dlsym function in the inferior
 def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     hdr = read_header(objfile_name)
     if hdr is None:
@@ -379,17 +416,22 @@ def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
         raise gdb.GdbError("Couldn't find symbol " + symbol_name)
     return symbol_address
 
-def alloc_log_storage():
+# allocate memory for the log
+# write corresponding pointers to the master library header
+def alloc_log_storage() -> bool:
     hdr = read_header(master_lib_path)
     hdr.log_page_ptr = exec_mmap(NULL, LOG_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if hdr.log_page_ptr == -1:
-        return NULL
+        return False
     hdr.patch_backup_page_ptr = exec_mmap(NULL, PATCH_BACKUP_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if hdr.patch_backup_page_ptr == -1:
         exec_munmap(hdr.log_page_ptr, LOG_SIZE)
-        return NULL
+        return False
     write_header(master_lib_path, hdr)
+    return True
 
+# free memory occupied by the log
+# if no log is allocated the function should ignore it
 def free_log_storage():
     hdr = read_header(master_lib_path)
     if hdr.log_page_ptr != NULL:
@@ -397,16 +439,18 @@ def free_log_storage():
     if hdr.patch_backup_page_ptr != NULL:
         exec_munmap(hdr.patch_backup_page_ptr, PATCH_BACKUP_SIZE)
 
+#define structure for log entry
 class struct_log_entry:
-    def __init__(self, target_func_ptr: int,
-        patch_func_ptr: int,
-        patch_type: str,
-        timestamp: int,
-        path_offset: int,
-        is_active: bool,
-        membackup_offset: int,
-        path_len: int,
-        membackup_len: int):
+    def __init__(self,
+        target_func_ptr: int,  # target function pointer
+        patch_func_ptr: int,   # patch function pointer
+        patch_type: str,       # type of patch procedure performed
+        timestamp: int,        # timestamp
+        path_offset: int,      # offset of the patch library path string in section for variable length data
+        is_active: bool,       # indicates whether the patch is active
+        membackup_offset: int, # offset of the memory backup in section for variable length data
+        path_len: int,         # length of the patch lirbary path string
+        membackup_len: int):   # length of the memory backup
         self.target_func_ptr = target_func_ptr
         self.patch_func_ptr = patch_func_ptr
         if patch_type != "O" and patch_type != "L":
@@ -419,6 +463,7 @@ class struct_log_entry:
         self.path_len = path_len
         self.membackup_len = membackup_len
 
+    # returns a string representing the log entry
     def to_string(self):
         global master_lib_path
         hdr = read_header(master_lib_path)
@@ -447,6 +492,7 @@ class struct_log_entry:
             return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", "unknown function (library is closed)"])
         return "".join([tmp, str(datetime.fromtimestamp(self.timestamp)), ": ", target_func_str, " -> ", path, ":", patch_func_str])
 
+# converts log entry in raw byte form to a list of log entries
 def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
     target_func_ptr = int.from_bytes(buffer[0:8], BYTE_ORDER)
     patch_func_ptr = int.from_bytes(buffer[8:16], BYTE_ORDER)
@@ -470,6 +516,7 @@ def bytearray_to_log_entry(buffer: bytearray) -> struct_log_entry:
     membackup_len = int.from_bytes(buffer[31:32], BYTE_ORDER)
     return struct_log_entry(target_func_ptr, patch_func_ptr, patch_type_str, timestamp, path_offset, is_active, membackup_offset, path_len, membackup_len)
 
+# read log entry at index
 def read_log_entry(index: int) -> struct_log_entry:
     global master_lib_path
     header = read_header(master_lib_path)
@@ -481,6 +528,7 @@ def read_log_entry(index: int) -> struct_log_entry:
     buffer = bytearray(inferior.read_memory(log_address, LOG_ENTRY_SIZE))
     return bytearray_to_log_entry(buffer)
 
+# converts struct_log_entry object to raw bytes
 def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
     log_entry_buf = bytearray()
     log_entry_buf.extend(log_entry.target_func_ptr.to_bytes(8, BYTE_ORDER))
@@ -505,6 +553,7 @@ def log_entry_to_bytearray(log_entry: struct_log_entry) -> bytearray:
     log_entry_buf.extend(log_entry.membackup_len.to_bytes(1, BYTE_ORDER))
     return log_entry_buf
 
+# write log entry at index
 def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     global master_lib_path
     header = read_header(master_lib_path)
@@ -514,6 +563,7 @@ def write_log_entry(log_entry: struct_log_entry, index: int) -> None:
     log_entry_buf = log_entry_to_bytearray(log_entry)
     inferior.write_memory(log_ptr, log_entry_buf, len(log_entry_buf))
 
+# convert whole log in raw bytes form to a list of log entries
 def log_to_entry_array() -> list[struct_log_entry]:
     hdr = read_header(master_lib_path)
     result = list()
@@ -524,6 +574,7 @@ def log_to_entry_array() -> list[struct_log_entry]:
         result.append(bytearray_to_log_entry(buffer[(i*LOG_ENTRY_SIZE):((i+1)*LOG_ENTRY_SIZE)]))
     return result
 
+# convert list of log entries to raw bytes and write the log
 def entry_array_to_log(entries: list[struct_log_entry]):
     hdr = read_header(master_lib_path)
     if hdr.log_page_ptr == NULL:
@@ -540,11 +591,13 @@ def get_last_log_entry() -> struct_log_entry:
         return None
     return read_log_entry(hdr.log_entries_count - 1)
 
+# define structure representing variable length metadata from log entry
 class struct_patch_backup:
     def __init__(self, path: str, membackup: bytearray):
-        self.path = path
-        self.membackup = membackup
+        self.path = path            # path to the patch library
+        self.membackup = membackup  # memory overwritten by a trampoline or backed up got entry
 
+    # return size of the whole object
     def size(self) -> int:
         result = 0
         if self.path is not None:
@@ -553,6 +606,7 @@ class struct_patch_backup:
             result += len(self.membackup)
         return result
 
+# read variable length metadata for the corresponding log entry
 def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
     global master_lib_path
     path = None
@@ -567,11 +621,14 @@ def read_log_entry_data(log_entry: struct_log_entry) -> struct_patch_backup:
         membackup = bytearray(inferior.read_memory(log_data_ptr + log_entry.membackup_offset, log_entry.membackup_len))
     return struct_patch_backup(path, membackup)
 
+# add new log entry to the log
 def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup) -> None:
     global master_lib_path
     header = read_header(master_lib_path)
     if header.log_page_ptr == NULL or header.patch_backup_page_ptr == NULL:
-        alloc_log_storage()
+        if not alloc_log_storage():
+            print("Couldn't allocate memory for the log.")
+            return None
     header = read_header(master_lib_path)
     index = header.log_entries_count
     patch_backup_ptr = header.patch_backup_page_ptr
@@ -619,6 +676,7 @@ def find_last_patch_and_set_as_inactive(func_address: int) -> str:
         i -= 1
     return result
 
+# find first patch patching the function at func_address address
 def find_first_patch(func_address: int) -> struct_log_entry:
     global master_lib_path
     entries = log_to_entry_array()
@@ -627,6 +685,7 @@ def find_first_patch(func_address: int) -> struct_log_entry:
             return entry
     return None
 
+# copy the log to another patch library
 def copy_log(dest: str, src: str):
     global master_lib_path
     src_hdr = read_header(src)
@@ -645,6 +704,7 @@ def copy_log(dest: str, src: str):
     write_header(src, src_hdr)
     master_lib_path = dest
 
+# close patch library lib
 def close_lib(lib: str):
     global master_lib_path
     hdr = read_header(lib)
@@ -672,6 +732,7 @@ def close_lib(lib: str):
         master_lib_path = ""
     dlclose(hdr.libhandle)
 
+# decrease reference count of lib patch library
 def decrease_refcount(lib: str):
     hdr = read_header(lib)
     hdr.refcount -= 1
@@ -679,6 +740,8 @@ def decrease_refcount(lib: str):
     if hdr.refcount <= 0:
         close_lib(lib)
 
+# steal the reference count of the active library for func_address function
+# add it to the new library
 def steal_refcount(func_address: int, current_lib: str):
     lib = find_last_patch_and_set_as_inactive(func_address)
     if lib is not None:
@@ -689,6 +752,7 @@ def steal_refcount(func_address: int, current_lib: str):
     current.refcount += 1
     write_header(current_lib, current)
 
+# find the master library
 def find_master_lib() -> None:
     global master_lib_path
     master_lib_path = ""
@@ -702,6 +766,7 @@ def find_master_lib() -> None:
         if header.contains_log:
             master_lib_path = objfile.filename
 
+# define structure representing absolute trampoline
 class AbsoluteTrampoline:
     def __init__(self):
        self.trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3")
@@ -709,17 +774,21 @@ class AbsoluteTrampoline:
     def size(self) -> int:
         return len(self.trampoline)
 
+    # write the jump address addr to the trampoline
     def complete_address(self, addr: bytearray):
         for i in range(8):
             self.trampoline[i+2] = addr[i]
 
+    # write the trampoline in the memory at address
     def write_trampoline(self, address: int):
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
+# AbsoluteTrampoline aligned to 16 bytes padded with 3 nop instructions
 class AlignedAbsoluteTrampoline(AbsoluteTrampoline):
     def __init__(self):
         self.trampoline = bytearray.fromhex("49 bb 00 00 00 00 00 00 00 00 41 ff e3 90 90 90")
 
+# define structure representing relative trampoline
 class RelativeTrampoline:
     def __init__(self):
         self.trampoline = bytearray.fromhex("e9 00 00 00 00")
@@ -727,14 +796,18 @@ class RelativeTrampoline:
     def size(self) -> int:
         return len(self.trampoline)
 
+    #write the jump offset address to the trampoline
     def complete_address(self, address: int):
         offset = address.to_bytes(4, BYTE_ORDER, signed=True)
         for i in range(4):
             self.trampoline[i+1] = offset[i]
 
+    # write the trampoline in the memory at address
     def write_trampoline(self, address: int):
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
+# perform patching of own function
+# fall back to the absolute trampoline in case the short one cannot be used
 def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool, trampoline_type: TrampolineType):
     #control flow must not be where the trampoline is about to be inserted
     #TODO control flow must not be in the function, it may lead to crash
@@ -770,6 +843,8 @@ def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int,
         ret = NULL
     elif trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
         ret = alloc_trampoline(target_addr)
+        if ret == NULL:
+            print("Couldn't allocate a trampoline, falling back to the absolute trampoline.")
     else:
         raise gdb.GdbError("Got wrong type of trampoline.")
     if ret == NULL:
@@ -789,6 +864,7 @@ def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int,
     if mark_log_entry:
         add_log_entry(entry, backup)
 
+# perform patching library functions
 def do_patch_lib(target_ptr: int, patch: int, path: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool):
     #fetch relative offset
     relative_addr = int.from_bytes(inferior.read_memory(target_ptr + 2, 4), BYTE_ORDER, signed=True)
@@ -826,6 +902,7 @@ def do_patch_lib(target_ptr: int, patch: int, path: str, path_offset: int, path_
     #write patch function address
     inferior.write_memory(addr_got, patch_arr, 8)
 
+# find the first log entry representing a patch from the library path
 def find_first_log_lib(path: str) -> struct_log_entry:
     entries = log_to_entry_array()
     for entry in entries:
@@ -834,6 +911,12 @@ def find_first_log_lib(path: str) -> struct_log_entry:
             return entry
     return None
 
+# define class representing GDB command invoked to perform a patch
+# Parameters:
+#
+# path to patch library
+# optional: '--log'
+# by default no logging is done unless the second parameter is specified
 class Patch (gdb.Command):
     "Patch functions."
 
@@ -842,8 +925,13 @@ class Patch (gdb.Command):
     def __init__(self):
         super(Patch, self).__init__("patch", gdb.COMMAND_USER)
 
+    # check if the metadata in the patch library is valid
+    # return list of tuples representing the patch instructions
+    # the tuples are as follows (patch type, trampoline type, target function address, patch function address)
     def check_patch_metadata(self, instructions: list[list[str]], path: str) -> list[tuple[str, str, int, int]]:
         result = []
+        # only own or library functions are valid options
+        # only short, absolute or no trampolines are valid options
         for instruction in instructions:
             if instruction[0] != 'O' and instruction[0] != 'L':
                 return None
@@ -851,14 +939,17 @@ class Patch (gdb.Command):
                 return None
 
         for instruction in instructions:
+            # check if patch function specified in the instructions is present in the library
             patch_func = instruction[3]
             try:
                 patch_ptr = find_object_dlsym(patch_func, path)
             except:
                 return None
 
+            # check if target function symbol is present in the target process
             target_func = instruction[2]
             if instruction[0] == 'O':
+                # the user can specify the address directly
                 match = re.match(HEX_REGEX, target_func)
                 if match is not None:
                     target_ptr = int(target_func, 16)
@@ -877,6 +968,7 @@ class Patch (gdb.Command):
             result.append((instruction[0], instruction[1], target_ptr, patch_ptr))
         return result
 
+    # read patch instruction/metadata from the patch library
     def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
         header = read_header(objfile)
         if header is None:
@@ -894,15 +986,16 @@ class Patch (gdb.Command):
             result.append(item.split(":"))
         return result
 
+    # check if essential types are present in the target process
     def is_patchable(self):
         try:
-            #check if essential types are present in the target process
             for t in type_list:
                 self.type_dict[t] = gdb.lookup_type(t)
         except:
             raise gdb.GdbError("Required types were not supported.")
  
     #magic constant checking is in read_header function
+    # open the patch library using dlopen function
     def load_patch_lib(self, path: str):
         self.dlopen_ret = dlopen(c_string(path), 2)
         if self.dlopen_ret == NULL:
@@ -912,10 +1005,12 @@ class Patch (gdb.Command):
             raise gdb.GdbError("Object file " + path + " has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
-        
+
+    # API method which ensures the path to the patch library is completed in shell
     def complete(self, text, word):
         return gdb.COMPLETE_FILENAME
 
+    # API method which is called when the user invokes the command
     def invoke(self, arg, from_tty):
         global master_lib_path
         self.type_dict.clear()
@@ -996,10 +1091,19 @@ def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry
         i += 1
     return None
 
+# define structure representing a command which performs reapplication of an incative patch
+# or reverts an active patch, i.e. restores the state from before the patch application
+#
+# Parameters:
+#
+# number specifying the the index of a log entry in the log
+# special parameter: 0 represents patch reversion, by default every active patch is reverted
+# optional: a list of functions to be reverted might be specified with the special parameter
 class ReapplyPatch(gdb.Command):
     def __init__(self):
         super(ReapplyPatch, self).__init__("patch-reapply", gdb.COMMAND_USER)
 
+    # this method reverts all active patches that were logged
     def revert_all(self):
         entries = log_to_entry_array()
         for i in range(len(entries)):
@@ -1025,6 +1129,7 @@ class ReapplyPatch(gdb.Command):
             write_log_entry(entry, i)
             decrease_refcount(backup.path)
 
+    # revert patches specified as arguments
     def revert(self, argv: list[str]):
         if len(argv) == 1:
             self.revert_all()
@@ -1066,6 +1171,8 @@ class ReapplyPatch(gdb.Command):
             decrease_refcount(backup.path)
             i += 1
 
+    # API method called when the user invokes the command
+    # takes a number and optionally a list as parameters
     def invoke(self, arg, from_tty):
         global master_lib_path
         argv = gdb.string_to_argv(arg)
@@ -1106,6 +1213,7 @@ class ReapplyPatch(gdb.Command):
         if log_entry.patch_type == "O":
             ret = alloc_trampoline(log_entry.target_func_ptr)
             if ret == NULL:
+                print("Couldn't allocate a trampoline, falling back to the absolute trampoline.")
                 trampoline = AbsoluteTrampoline()
                 trampoline.complete_address(bytearray(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER)))
                 trampoline.write_trampoline(log_entry.target_func_ptr)
@@ -1128,6 +1236,7 @@ class ReapplyPatch(gdb.Command):
         log_entry.is_active = True
         write_log_entry(log_entry, index)
 
+# convert the whole log to a string
 def log_to_string() -> str:
     entries = log_to_entry_array()
     result = "[0] revert"
@@ -1137,10 +1246,13 @@ def log_to_string() -> str:
         i += 1
     return result
 
+# define a structure representing a command which prints the log
+# No parameters
 class PatchLog(gdb.Command):
     def __init__(self):
         super(PatchLog, self).__init__("patch-log", gdb.COMMAND_USER)
 
+    # API method called when the user invokes the command
     def invoke(self, arg, from_tty):
         global master_lib_path
         argv = gdb.string_to_argv(arg)
@@ -1154,10 +1266,17 @@ class PatchLog(gdb.Command):
             return
         print(log_to_string())
 
+# define a structure representing a command
+#
+# Parameters:
+#
+# path to the destination file
 class PatchLogDump(gdb.Command):
     def __init__(self):
         super(PatchLogDump, self).__init__("patch-dump", gdb.COMMAND_USER)
 
+    # API method called when the user invokes the command
+    # takes one argument - the file path
     def invoke(self, arg, from_tty):
         global master_lib_path
         argv = gdb.string_to_argv(arg)
@@ -1176,6 +1295,8 @@ class PatchLogDump(gdb.Command):
         file.write(log_to_string())
         file.close()
 
+# create instances of the commands
+# required by GDB python API
 Patch()
 PatchLog()
 ReapplyPatch()
