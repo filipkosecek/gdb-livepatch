@@ -78,7 +78,7 @@ def find_object_obj(symbol_name: str, objfile_name: str) -> gdb.Value:
         objfile = gdb.lookup_objfile(objfile_name)
         symbol = objfile.lookup_global_symbol(symbol_name).value()
     except:
-        raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
+        raise gdb.GdbError("Couldn't find symbol in object file.")
     else:
         return symbol
 
@@ -87,7 +87,7 @@ def find_object(symbol_name: str) -> gdb.Value:
     try:
         symbol = gdb.parse_and_eval(symbol_name)
     except:
-        raise gdb.GdbError("Couldn't find " + symbol_name + ".")
+        raise gdb.GdbError("Couldn't find symbol name.")
     else:
         return symbol
 
@@ -97,7 +97,7 @@ def find_object_static(symbol_name: str, objfile_name: str) -> int:
         objfile = gdb.lookup_objfile(objfile_name)
         symbol = int(objfile.lookup_static_symbol(symbol_name).value().address)
     except:
-        raise gdb.GdbError("Couldn't find " + symbol_name + "in object file " + objfile_name + ".")
+        raise gdb.GdbError("Couldn't find symbol name in object file.")
     else:
         return symbol
 
@@ -113,7 +113,7 @@ def init_global_vars():
 
 # map address to the symbol name on the address using info symbol command
 def addr_to_symbol(address: int) -> str:
-    cmd = gdb.execute("info symbol " + str(address), to_string=True)
+    cmd = gdb.execute("info symbol %s" % str(address), to_string=True)
     match = re.match("No symbol matches .*\.", cmd)
     if match:
         return None
@@ -273,7 +273,7 @@ def save_registers() -> dict[str, int]:
 # restore the values of the registers stored in registers dictionary
 def restore_registers(registers: dict[str, int]):
     for reg in registers:
-        gdb.execute("set $" + reg + "=" + str(registers[reg]))
+        gdb.execute("set $%s = %s" % (reg, str(registers[reg])))
 
 # exec system call in the inferior process
 def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int, arg5: int, arg6: int) -> int:
@@ -283,18 +283,18 @@ def exec_syscall(syscall_number: int, arg1: int, arg2: int, arg3: int, arg4: int
     rip = registers["rip"]
     #align rip at the beginning of the page
     rip &= PAGE_MASK
-    gdb.execute("set $rip = " + str(rip))
+    gdb.execute("set $rip = %s" % str(rip))
     syscall_instruction = bytearray.fromhex("0f 05")
     membackup = bytearray(inferior.read_memory(rip, 2))
     inferior.write_memory(rip, syscall_instruction, 2)
     #set register values
-    gdb.execute("set $rax = " + str(syscall_number))
-    gdb.execute("set $rdi = " + str(arg1))
-    gdb.execute("set $rsi = " + str(arg2))
-    gdb.execute("set $rdx = " + str(arg3))
-    gdb.execute("set $r10 = " + str(arg4))
-    gdb.execute("set $r8 = " + str(arg5))
-    gdb.execute("set $r9 = " + str(arg6))
+    gdb.execute("set $rax = %s" % str(syscall_number))
+    gdb.execute("set $rdi = %s" % str(arg1))
+    gdb.execute("set $rsi = %s" % str(arg2))
+    gdb.execute("set $rdx = %s" % str(arg3))
+    gdb.execute("set $r10 = %s" % str(arg4))
+    gdb.execute("set $r8 = %s" % str(arg5))
+    gdb.execute("set $r9 = %s" % str(arg6))
     gdb.execute("si")
     ret = int(gdb.parse_and_eval("$rax").cast(gdb.lookup_type("uint64_t")))
     restore_registers(registers)
@@ -413,7 +413,7 @@ def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
     libhandle = hdr.libhandle
     symbol_address = int(dlsym(libhandle, c_string(symbol_name)).cast(gdb.lookup_type("uint64_t")))
     if symbol_address == NULL:
-        raise gdb.GdbError("Couldn't find symbol " + symbol_name)
+        raise gdb.GdbError("Couldn't find symbol name.")
     return symbol_address
 
 # allocate memory for the log
@@ -960,7 +960,7 @@ class Patch (gdb.Command):
                         return None
             else:
                 try:
-                    target = "'" + target_func + "@plt'"
+                    target = "'%s@plt'" % target_func
                     target_ptr = int(find_object(target).cast(gdb.lookup_type("uint64_t")))
                 except:
                     return None
@@ -1002,7 +1002,7 @@ class Patch (gdb.Command):
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None:
-            raise gdb.GdbError("Object file " + path + " has a wrong format.")
+            raise gdb.GdbError("Object file has a wrong format.")
         header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
         write_header(path, header)
 
@@ -1146,7 +1146,7 @@ class ReapplyPatch(gdb.Command):
             if entry is None:
                 #try to find library function
                 try:
-                    function_address = int(find_object("'" + argv[i] + "@plt'").cast(gdb.lookup_type("uint64_t")))
+                    function_address = int(find_object("'%s@plt'" % argv[i]).cast(gdb.lookup_type("uint64_t")))
                 except:
                     raise gdb.GdbError("Nothing to revert.")
                 entry = find_active_entry_and_set_as_inactive(function_address)
