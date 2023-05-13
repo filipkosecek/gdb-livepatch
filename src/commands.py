@@ -765,6 +765,7 @@ def find_master_lib() -> None:
             continue
         if header.contains_log:
             master_lib_path = objfile.filename
+            return
 
 # define structure representing absolute trampoline
 class AbsoluteTrampoline:
