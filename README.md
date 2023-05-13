@@ -69,6 +69,16 @@ The most important requirements for the building process are:
   - patch libraries must contain debugging symbols
   - patch libraries must be compiled as shared libraries
 
+The extension cannot handle symbol name collisions correctly.
+In other words, if you declare a function in your patch library and its name is
+already used in the target process, the patching will likely not
+work correctly and might crash the process. Symbol names can be
+shared across the patch objects as the search scope is limited
+to the patch object. For this reason, it is recommended that
+replacement functions are named after the functions they are going
+to replace with slight modifications, e.g. adding `new_` prefix
+to the name of the original function.
+
 ### Ataching to a process
 
 To attach to a running process, you have to start with `gdb -p $process_pid`.
