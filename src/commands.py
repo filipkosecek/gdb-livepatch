@@ -745,7 +745,6 @@ def decrease_refcount(lib: str):
 def steal_refcount(func_address: int, current_lib: str):
     lib = find_last_patch_and_set_as_inactive(func_address)
     if lib is not None:
-        pass
         decrease_refcount(lib)
 
     current = read_header(current_lib)
