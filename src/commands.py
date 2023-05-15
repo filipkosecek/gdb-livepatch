@@ -828,7 +828,7 @@ def do_patch_own(target_addr: int, patch_addr: int, libhandle: int, membackup_of
     elif trampoline_type == TrampolineType.SHORT_TRAMPOLINE:
         ret = alloc_trampoline(target_addr)
         if ret == NULL:
-            print("Couldn't allocate a trampoline, falling back to the absolute trampoline.")
+            print("Couldn't allocate a trampoline in the trampoline page, falling back to the absolute trampoline.")
     else:
         raise gdb.GdbError("Got wrong type of trampoline.")
     if ret == NULL:
