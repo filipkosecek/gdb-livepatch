@@ -407,11 +407,7 @@ def get_instruction_prefix(addr: int) -> int:
     return tmp[0]
 
 # find a symbol address in objfile_name file using dlsym function in the inferior
-def find_object_dlsym(symbol_name: str, objfile_name: str) -> int:
-    hdr = read_header(objfile_name)
-    if hdr is None:
-        return NULL
-    libhandle = hdr.libhandle
+def find_object_dlsym(symbol_name: str, libhandle: int) -> int:
     symbol_address = int(dlsym(libhandle, c_string(symbol_name)).cast(gdb.lookup_type("uint64_t")))
     if symbol_address == NULL:
         raise gdb.GdbError("Couldn't find symbol name.")
@@ -739,6 +735,7 @@ def find_master_lib() -> None:
     master_lib_path = ""
     found = False
     last = None
+    handle_to_path_mapping.clear()
     for objfile in gdb.objfiles():
         try:
             header = read_header(objfile.filename)
@@ -906,7 +903,7 @@ class Patch (gdb.Command):
     # check if the metadata in the patch library is valid
     # return list of tuples representing the patch instructions
     # the tuples are as follows (patch type, trampoline type, target function address, patch function address)
-    def check_patch_metadata(self, instructions: list[list[str]], path: str) -> list[tuple[str, str, int, int]]:
+    def check_patch_metadata(self, instructions: list[list[str]]) -> list[tuple[str, str, int, int]]:
         result = []
         # only own or library functions are valid options
         # only short, absolute or no trampolines are valid options
@@ -920,7 +917,7 @@ class Patch (gdb.Command):
             # check if patch function specified in the instructions is present in the library
             patch_func = instruction[3]
             try:
-                patch_ptr = find_object_dlsym(patch_func, path)
+                patch_ptr = find_object_dlsym(patch_func, self.dlopen_ret)
             except:
                 return None
 
@@ -947,13 +944,14 @@ class Patch (gdb.Command):
         return result
 
     # read patch instruction/metadata from the patch library
-    def extract_patch_metadata(self, objfile: str) -> list[list[str]]:
+    def extract_patch_metadata(self) -> list[list[str]]:
+        objfile = handle_to_path_mapping[self.dlopen_ret]
         header = read_header(objfile)
         if header is None:
             print("Couldn't find patch header.")
             return None
         commands_len = header.commands_len
-        commands = find_object_dlsym(PATCH_COMMANDS_VAR_NAME, objfile)
+        commands = find_object_dlsym(PATCH_COMMANDS_VAR_NAME, self.dlopen_ret)
 
         items = inferior.read_memory(commands, commands_len).tobytes().decode().split(";")
         result = []
@@ -975,14 +973,14 @@ class Patch (gdb.Command):
     #magic constant checking is in read_header function
     # open the patch library using dlopen function
     def load_patch_lib(self, path: str):
-        self.dlopen_ret = dlopen(c_string(path), 2)
+        self.dlopen_ret = int(dlopen(c_string(path), 2).cast(gdb.lookup_type("uint64_t")))
         if self.dlopen_ret == NULL:
             raise gdb.GdbError("Couldn't open the patch library.")
         header = read_header(path)
         if header is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("Object file has a wrong format.")
-        header.libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
+        header.libhandle = self.dlopen_ret
         handle_to_path_mapping[header.libhandle] = path
         write_header(path, header)
 
@@ -1013,11 +1011,11 @@ class Patch (gdb.Command):
         self.is_patchable()
 
         self.load_patch_lib(argv[0])
-        metadata = self.extract_patch_metadata(argv[0])
+        metadata = self.extract_patch_metadata()
         if metadata is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("The library has invalid data.")
-        patch_commands = self.check_patch_metadata(metadata, argv[0])
+        patch_commands = self.check_patch_metadata(metadata)
         if patch_commands is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("The library has invalid data.")
@@ -1026,7 +1024,7 @@ class Patch (gdb.Command):
         tmp = read_header(master_lib_path)
         tmp.contains_log = True
         write_header(master_lib_path, tmp)
-        libhandle = int(self.dlopen_ret.cast(gdb.lookup_type("uint64_t")))
+        libhandle = self.dlopen_ret
         for patch in patch_commands:
             target_func = patch[2]
             patch_func = patch[3]
