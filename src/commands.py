@@ -911,6 +911,18 @@ def find_first_log_lib(path: str) -> struct_log_entry:
             return entry
     return None
 
+def handle2libpath(libhandle: int) -> str:
+    for objfile in gdb.objfiles():
+        try:
+            header = read_header(objfile.filename)
+        except:
+            continue
+        if header is None:
+            continue
+
+        if header.libhandle == libhandle:
+            return objfile.filename
+
 # define class representing GDB command invoked to perform a patch
 # Parameters:
 #
@@ -1035,16 +1047,17 @@ class Patch (gdb.Command):
         find_master_lib()
 
         self.load_patch_lib(argv[0])
-        metadata = self.extract_patch_metadata(argv[0])
+        path = handle2libpath(self.dlopen_ret)
+        metadata = self.extract_patch_metadata(path)
         if metadata is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("The library has invalid data.")
-        patch_commands = self.check_patch_metadata(metadata, argv[0])
+        patch_commands = self.check_patch_metadata(metadata, path)
         if patch_commands is None:
             dlclose(self.dlopen_ret)
             raise gdb.GdbError("The library has invalid data.")
         if not master_lib_path:
-            master_lib_path = argv[0]
+            master_lib_path = path
         tmp = read_header(master_lib_path)
         tmp.contains_log = True
         write_header(master_lib_path, tmp)
@@ -1060,22 +1073,22 @@ class Patch (gdb.Command):
                 trampoline_type = TrampolineType.SHORT_TRAMPOLINE
 
             if first_entry is None:
-                first_entry = find_first_log_lib(argv[0])
+                first_entry = find_first_log_lib(path)
 
             if patch[0] == 'O':
                 #the first entry to be logged
                 if first_entry is None:
-                    do_patch_own(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry, trampoline_type)
+                    do_patch_own(target_func, patch_func, path, -1, 0, -1, 0, mark_log_entry, trampoline_type)
                 #copy the references from the first entry from this library, i.e. first_entry
                 else:
-                    do_patch_own(target_func, patch_func, argv[0], first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry, trampoline_type)
+                    do_patch_own(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry, trampoline_type)
             elif patch[0] == 'L':
                 #the first entry to be logged
                 if first_entry is None:
-                    do_patch_lib(target_func, patch_func, argv[0], -1, 0, -1, 0, mark_log_entry)
+                    do_patch_lib(target_func, patch_func, path, -1, 0, -1, 0, mark_log_entry)
                 #copy the references from the first entry from this library, i.e. first_entry
                 else:
-                    do_patch_lib(target_func, patch_func, argv[0], first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
+                    do_patch_lib(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
 
 #WARNING!!! sets found library as inactive
 #TODO poor design
