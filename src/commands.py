@@ -13,7 +13,7 @@ BYTE_ORDER = "little"
 NULL = 0
 
 # metadata structures sizes and corresponding symbol names
-MAGIC_CONSTANT = 428761983
+MAGIC_CONSTANT = 0x198E637F
 HEADER_SIZE = 48
 LOG_ENTRY_SIZE = 32
 LOG_SIZE = 2*4096
@@ -1253,7 +1253,7 @@ class ReapplyPatch(gdb.Command):
             relative_offset = int.from_bytes(bytearray(inferior.read_memory(instruction_ptr, 4)), BYTE_ORDER, signed=True)
             instruction_ptr += 4
             got_entry = instruction_ptr + relative_offset
-            inferior.write(log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER))
+            inferior.write_memory(got_entry, log_entry.patch_func_ptr.to_bytes(8, BYTE_ORDER), 8)
 
         log_entry.is_active = True
         write_log_entry(log_entry, index)

@@ -1,13 +1,17 @@
 # Linux process live patching using GDB
 
 The project focuses on Linux process live patching using GNU debugger tool
-targeting `x86_64` architecture. It can be used to patch whole functions
+targeting x86-64 architecture. It can be used to patch whole functions
 of the target process as well tracking and logging changes made.
 This extension is also able to revert these changes, i.e. restoring
 the original functions.
 
 The extension has its limitations, therefore it is not recommended
 to use it for critical software.
+
+## Repository
+
+
 
 ## Installation
 
@@ -31,7 +35,7 @@ interpreter you are running, you can visit [this page](https://www.w3resource.co
 to learn how to do it directly in python interpreter. Any version of Python 3 should be sufficient.
 In a GDB session, Python interpreter can be invoked using `python-interactive`.
 
-There are two ways to import the extension script. Firstly, you can launch GDB
+There are two ways to import [the extension script](src/commands.py). Firstly, you can launch GDB
 with the path (either relative or absolute) to the script as a parameter.
 ```
 gdb -p $pid --command=src/commands.py
@@ -102,6 +106,8 @@ so you might encounter errors during the patching. The most common are the follo
   - the target process missing both the symbol table and debugging symbols
   - missing glibc debugging symbols
   - missing patch instruction definition, e.g. no definition of the replaced and replacing function
+  - C macro file (`src/patch.h`) not included in your patch library
+  - macros for patch instructions not used in your patch library
   - typographical errors in replaced or replacing function names
 
 ### Printing patch history
@@ -148,4 +154,14 @@ The list can contain either a hex address of the function or its name.
 A patch could be reverted like this:
 ```
 patch-reapply 0 old_function
+```
+
+### The bash wrapper
+
+A [bash script](patch.sh) is provided which simplifies the patching procedure.
+GDB does not need to be invoked manually. The script takes PID of the target process
+as the first argument followed by the command to be executed in GDB.
+For example, to apply a patch with logging turned on, one could use the following command:
+```
+./patch.sh $pid patch examples/more/patch.so --log
 ```
