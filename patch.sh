@@ -23,11 +23,6 @@ case $2 in
 			COMMANDS="patch $3\n"
 		#logging
 		elif [[ "$#" -eq 4 ]]; then
-			#check if the patch library exists
-			if [[ ! -f "$3" ]]; then
-				echo "The patch library does not exist." 1<&2
-				exit 1
-			fi
 			if [[ "$4" != "--log" ]]; then
 				echo "Enter \"--log\" to turn on logging." 1<&2
 				exit 1
