@@ -9,9 +9,18 @@ the original functions.
 The extension has its limitations, therefore it is not recommended
 to use it for critical software.
 
-## Repository
+## Repository structure
+Directory `src/` contains two main components:
 
+  - `commands.py` - the python script defining new GDB commands which perform the patching
+  - `patch.h` - C header file containing macros and metadata structures definitions which every patch library must use
 
+Directory `examples/` contains various examples of target processes
+as well as patch libraries each in a separate subdirectory. Every example
+contains a `Makefile` which builds the target process and libraries
+from the source code.
+
+The repository contains [a bash wrapper](patch.sh) to simplify the patching process.
 
 ## Installation
 
@@ -64,7 +73,7 @@ via package managers on most Linux distributions.
 
 Patches are represented as shared libraries with declared functions which are to replace
 the old ones. The libraries must contain special instructions and metadata declared
-in src/patch.h file. In examples/ directory, you can see various examples
+in [C header](src/patch.h) file. In [examples](examples/) directory, you can see various examples
 which use the defined instructions and metadata definitions and contain
 Makefile files for building the patches. Using this building process is strongly advised
 so we recommend to make a copy of such a Makefile when writing a patch.
