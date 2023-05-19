@@ -1,3 +1,8 @@
+# TODO list:
+# remove global directive
+# use gdb.lookup_global_symbol() for dl functions
+# split the script into multiple files
+
 import gdb
 import time
 import re
@@ -151,8 +156,6 @@ class struct_header:
         print(self.patch_data_array_len)
         print(self.commands_len)
 
-#TODO check if lookup_static_symbol throws an exception ot returns None
-#TODO objfile lookup is probably unnecessary
 # read header from objfile_path file
 def read_header(objfile_path: str) -> struct_header:
     patchlib = gdb.lookup_objfile(objfile_path)
@@ -248,6 +251,7 @@ def find_nearest_free_page(address: int) -> int:
 def init_trampoline_bitmap(address: int):
     inferior.write_memory(address, bytearray(TRAMPOLINE_BITMAP_SIZE), TRAMPOLINE_BITMAP_SIZE)
 
+# TODO only dump rip, rax, rdi, rsi, rdx, r10, r8, r9
 # make a backup of all general purpose registers
 def save_registers() -> dict[str, int]:
     result = dict()
@@ -372,7 +376,6 @@ def alloc_trampoline(target_function_address: int) -> int:
         hdr.trampoline_page_ptr = ret
         write_header(master_lib_path, hdr)
     else:
-        #TODO validate this
         #abort if the function is too far from the already allocated trampoline page
         if abs(target_function_address - hdr.trampoline_page_ptr) > (pow(2, 31) - 1):
             return NULL
@@ -657,7 +660,8 @@ def add_log_entry(log_entry: struct_log_entry, patch_backup: struct_patch_backup
 
     write_log_entry(log_entry, index)
 
-#TODO also sets log is_active flag
+# find last active patch for func_address function
+# and set the entry as inactive
 def find_last_patch_and_set_as_inactive(func_address: int) -> str:
     global master_lib_path
     entries = log_to_entry_array()
@@ -1090,8 +1094,7 @@ class Patch (gdb.Command):
                 else:
                     do_patch_lib(target_func, patch_func, path, first_entry.path_offset, first_entry.path_len, -1, 0, mark_log_entry)
 
-#WARNING!!! sets found library as inactive
-#TODO poor design
+# find active entry, set as it as inactive and return the structure
 def find_active_entry_and_set_as_inactive(func_address: int) -> struct_log_entry:
     global master_lib_path
     entries = log_to_entry_array()

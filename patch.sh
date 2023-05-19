@@ -1,4 +1,5 @@
-# This script reduces the downtime of patch application
+# This script serves as a wrapper for GDB to reduce downtime
+# and simplify the patching process
 # Invokes GDB and performs the specified operation
 
 #!/bin/bash
