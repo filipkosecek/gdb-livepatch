@@ -2,6 +2,7 @@
 # remove global directive
 # use gdb.lookup_global_symbol() for dl functions
 # split the script into multiple files
+# don't print log cannot be found when it is not found
 
 import gdb
 import time
@@ -50,7 +51,7 @@ ABSOLUTE_TRAMPOLINE_SIZE = 13
 PADDED_TRAMPOLINE_SIZE = 16
 SHORT_TRAMPOLINE_SIZE = 5
 
-MAX_PAGE_DIST = pow(2, 25)
+MAX_PAGE_DIST = pow(2, 31) - 1
 
 # global variables
 master_lib_path = ""
@@ -214,38 +215,61 @@ def write_header(objfile_path: str, header: struct_header) -> None:
 
 # parse process mappings from info proc mappings command
 # return a list containing allocated pages
-def find_mappings() -> set[int]:
+def find_mappings() -> list[[int, int]]:
     mappings = gdb.execute("info proc mappings", to_string=True)
     mappings_list = re.findall(MAPPINGS_LINE_REGEX, mappings, re.MULTILINE)
-    allocated_pages = set()
+    allocated_areas = list()
     for line in mappings_list:
         tmp = line.split()
-        page = int(tmp[0], 16)
+        base = int(tmp[0], 16)
         size = int(tmp[2], 16)
-        offset = 0
-        while offset < size:
-            allocated_pages.add(page + offset)
-            offset += PAGE_SIZE
-    return allocated_pages
+        allocated_areas.append((base, size))
+    return allocated_areas
 
 # find the closest free page to the address
-def find_nearest_free_page(address: int) -> int:
-    current = address & PAGE_MASK
+def find_nearest_free_page(target_address: int) -> int:
+    address = target_address & PAGE_MASK
     allocated_pages = find_mappings()
-    left = current - PAGE_SIZE
-    right = current + PAGE_SIZE
-    while left > 0 or right < 0x7fffffffffff:
-        if left > 0:
-            if abs(left - current) <= MAX_PAGE_DIST and left not in allocated_pages:
-                return left
-            left -= PAGE_SIZE
+    current = -1
+    for i in range(len(allocated_pages)):
+        mapping = allocated_pages[i]
+        if mapping[0] <= address and mapping[0] + mapping[1] > address:
+            current = i
+            break
+    if current == -1:
+        raise gdb.GdbError("Fatal error.")
 
-        if right < 0x7fffffffffff:
-            if abs(right - current) <= MAX_PAGE_DIST and right not in allocated_pages:
-                return right
-            right += PAGE_SIZE
+    first_mapping = allocated_pages[0]
+    last_mapping = allocated_pages[len(allocated_pages) - 1]
+    left = first_mapping[0] - PAGE_SIZE
+    right = last_mapping[0] + last_mapping[1]
 
-    return NULL
+    i = current - 1
+    while i >= 0:
+        mapping = allocated_pages[i]
+        mapping_next = allocated_pages[i+1]
+        if mapping[0] + mapping[1] < mapping_next[0]:
+            left = mapping_next[0] - PAGE_SIZE
+            break
+        i -= 1
+
+    i = current
+    while i < len(allocated_pages):
+        mapping = allocated_pages[i]
+        mapping_next = allocated_pages[i+1]
+        if mapping[0] + mapping[1] < mapping_next[0]:
+            right = mapping[0] + mapping[1]
+            break
+        i += 1
+
+    if address - left <= right - address:
+        result = left
+    else:
+        result = right
+
+    if abs(result - address) > MAX_PAGE_DIST:
+        return NULL
+    return result
 
 # fill bitmap in the trampoline page with zeros
 def init_trampoline_bitmap(address: int):
@@ -324,7 +348,7 @@ def alloc_trampoline_page(page_base: int, target_function_ptr: int) -> int:
     ptr = exec_mmap(page_base, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if ptr == -1:
         return NULL
-    if abs(ptr - target_function_ptr) > (pow(2,31) - 1):
+    if abs(ptr - target_function_ptr) > MAX_PAGE_DIST:
         exec_munmap(ptr, PAGE_SIZE)
         return NULL
     init_trampoline_bitmap(ptr)
@@ -377,7 +401,7 @@ def alloc_trampoline(target_function_address: int) -> int:
         write_header(master_lib_path, hdr)
     else:
         #abort if the function is too far from the already allocated trampoline page
-        if abs(target_function_address - hdr.trampoline_page_ptr) > (pow(2, 31) - 1):
+        if abs(target_function_address - hdr.trampoline_page_ptr) > MAX_PAGE_DIST:
             return NULL
     index = find_first_free_trampoline_index(hdr.trampoline_page_ptr)
     if index == -1:
