@@ -64,8 +64,21 @@ These symbols are available in all Linux distributions. They can be installed
 via package managers on most Linux distributions.
 ```
 (Debian) apt install libc6-dbg
-(Redhat) dnf install glibc-debuginfo
+(Redhat) dnf debuginfo-install glibc
 ```
+
+Alternatively, debuginfod service can be used on newer distributions to download
+the debugging information on the fly from a debuginfod server during a GDB session.
+Debuginfod can be enabled with the following command in GDB:
+
+```
+set debuginfod enabled on
+```
+
+This command can be added into `.gdbinit` script as well.
+
+Visit [this page](https://ubuntu.com/server/docs/service-debuginfod)
+for more details about debuginfod service.
 
 ## User manual
 
@@ -87,8 +100,8 @@ In other words, if you declare a function in your patch library and its name is
 already used in the target process, the patching will likely not
 work correctly and might crash the process. Symbol names can be
 shared across the patch objects as the search scope is limited
-to the patch object. For this reason, it is recommended that
-replacement functions are named after the functions they are going
+to the patch object. For this reason, it is recommended to
+name replacement functions after the functions they are going
 to replace with slight modifications, e.g. adding `new_` prefix
 to the name of the original function.
 
@@ -99,7 +112,7 @@ Alternatively, you can start GDB with `gdb` and run `attach $process_pid` in GDB
 
 ### Executing a patch
 
-To carry out a patch, you have to be attached to the desired process and
+To carry out a patch, you have to be attached to the target process and
 run `patch /path/to/your/patchlib`. We recommend to use the absolute path
 if the patch library is not in your standard search path. This will invoke
 the patching procedure with logging and tracking turned off. If you want
@@ -114,10 +127,10 @@ so you might encounter errors during the patching. The most common are the follo
   - relative path to the patch library
   - the target process missing both the symbol table and debugging symbols
   - missing glibc debugging symbols
-  - missing patch instruction definition, e.g. no definition of the replaced and replacing function
+  - missing patch instruction definition, e.g. no definition of the function to be replaced and the replacement function
   - C macro file (`src/patch.h`) not included in your patch library
   - macros for patch instructions not used in your patch library
-  - typographical errors in replaced or replacing function names
+  - typographical errors in original or replacement function names
 
 ### Printing patch history
 
@@ -126,7 +139,7 @@ You can print the log with
 ```
 patch-log
 ```
-taking no parameters. It contains patch information, most notably the replaced and the replacing
+taking no parameters. It contains patch information, most notably the original and the replacement
 functions and information whether the patch is active or not. The output of the command
 should look something like this:
 ```
@@ -151,14 +164,14 @@ It is possible to reapply a patch whose entry is marked in the log.
 The `patch-log` outputs a sorted list of marked entries.
 You can reapply any patch from the log with `patch-reapply` command
 which takes the index of the patch entry in the log. This patch is then reapplied
-in case the library containing the replacing function has not already been closed.
+in case the library containing the replacement function has not already been closed.
 A special parameter is 0 which represents patch reversion.
 
 ### Reverting patches
 
 You can revert an active patch with `patch-reapply` command with parameter 0.
 If no additional parameter is specified, all active patches are reverted.
-Otherwise, a list of replaced functions to be restored is specified.
+Otherwise, a list of original functions to be restored is specified.
 The list can contain either a hex address of the function or its name.
 A patch could be reverted like this:
 ```
