@@ -105,7 +105,7 @@ name replacement functions after the functions they are going
 to replace with slight modifications, e.g. adding `new_` prefix
 to the name of the original function.
 
-### Ataching to a process
+### Attaching to a process
 
 To attach to a running process, you have to start with `gdb -p $process_pid`.
 Alternatively, you can start GDB with `gdb` and run `attach $process_pid` in GDB shell.
