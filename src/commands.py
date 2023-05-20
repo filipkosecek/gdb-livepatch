@@ -1,9 +1,3 @@
-# TODO list:
-# remove global directive
-# use gdb.lookup_global_symbol() for dl functions
-# split the script into multiple files
-# don't print log cannot be found when it is not found
-
 import gdb
 import time
 import re
@@ -1288,6 +1282,8 @@ class ReapplyPatch(gdb.Command):
 # convert the whole log to a string
 def log_to_string() -> str:
     entries = log_to_entry_array()
+    if len(entries) == 0:
+        return None
     result = "[0] revert"
     i = 1
     for entry in entries:
@@ -1311,9 +1307,13 @@ class PatchLog(gdb.Command):
         init_global_vars()
         find_master_lib()
         if not master_lib_path:
-            print("Couldn't find the log. No patch applied.")
-            return
-        print(log_to_string())
+            raise gdb.GdbError("Couldn't find the log. No patches applied.")
+
+        log_string = log_to_string()
+        if log_string is None:
+            raise gdb.GdbError("Couldn't find the log. No patches applied.")
+
+        print(log_string)
 
 # define a structure representing a command
 #
@@ -1340,12 +1340,16 @@ class PatchLogDump(gdb.Command):
 
         find_master_lib()
         if not master_lib_path:
-            raise gdb.GdbError("Couldn't find master library.")
+            raise gdb.GdbError("Couldn't find the log. No patches applied.")
+
+        log_string = log_to_string()
+        if log_string is None:
+            raise gdb.GdbError("Couldn't find the log. No patches applied.")
 
         #open file
         file = open(argv[0], "w+")
 
-        file.write(log_to_string())
+        file.write(log_string)
         file.close()
 
 # create instances of the commands
