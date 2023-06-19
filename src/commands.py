@@ -46,6 +46,7 @@ PADDED_TRAMPOLINE_SIZE = 16
 SHORT_TRAMPOLINE_SIZE = 5
 
 MAX_PAGE_DIST = pow(2, 31) - 1
+MAX_FRAME_LEVEL = 128
 
 # global variables
 master_lib_path = ""
@@ -828,6 +829,22 @@ class RelativeTrampoline:
     def write_trampoline(self, address: int):
         inferior.write_memory(address, self.trampoline, len(self.trampoline))
 
+def is_on_call_stack(function_ptr: int) -> bool:
+    frame = gdb.newest_frame()
+    address = frame.function().value().address
+    function_name = frame.name()
+    while frame is not None and frame.level() <= MAX_FRAME_LEVEL:
+        if address == function_ptr:
+            return True
+        if function_name == "main":
+            break
+        frame = frame.older()
+        if frame.function() is None:
+            break
+        address = frame.function().value().address
+        function_name = frame.name()
+    return False
+
 # perform patching of own function
 # fall back to the absolute trampoline in case the short one cannot be used
 def do_patch_own(target_addr: int, patch_addr: int, path: str, path_offset: int, path_len: int, membackup_offset: int, membackup_len: int, mark_log_entry: bool, trampoline_type: TrampolineType):
@@ -998,6 +1015,9 @@ class Patch (gdb.Command):
                     target_ptr = int(find_object(target).cast(gdb.lookup_type("uint64_t")))
                 except:
                     return None
+
+            if instruction[0] == 'O' and is_on_call_stack(target_ptr):
+                return None
 
             result.append((instruction[0], instruction[1], target_ptr, patch_ptr))
         return result
@@ -1254,6 +1274,9 @@ class ReapplyPatch(gdb.Command):
 
         steal_refcount(log_entry.target_func_ptr, data.path)
         if log_entry.patch_type == "O":
+            if is_on_call_stack(log_entry.target_func_ptr):
+                raise gdb.GdbError("Cannot reapply the patch, the function is on the call stack.")
+
             ret = alloc_trampoline(log_entry.target_func_ptr)
             if ret == NULL:
                 print("Couldn't allocate a trampoline, falling back to the absolute trampoline.")
